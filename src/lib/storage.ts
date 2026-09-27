@@ -1,4 +1,5 @@
 import { mkdir, writeFile, readFile, unlink, stat } from "fs/promises";
+import { gunzipSync, gzipSync } from "zlib";
 import path from "path";
 import { Readable } from "stream";
 import {
@@ -9,133 +10,138 @@ import {
   HeadObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { resolveSetting } from "./appsettings";
 
 /**
- * Storage layer for book files — three backends, picked automatically:
+ * Storage layer — multi-provider, settings-driven, transparent gzip.
  *
- * 1. Backblaze B2 (production, when B2_KEY_ID + B2_APPLICATION_KEY set)
- *    10GB free, no credit card. S3-compatible via AWS SDK.
- *    - Uploads use PRESIGNED URLS: the browser PUTs the file straight to B2,
- *      bypassing serverless request-body limits (Vercel caps bodies ~4.5MB;
- *      books are 10–200MB).
- *    - Downloads stream from B2 (no full-file buffering).
- *    - Optional B2_CASCADE_* → second S3-compatible provider fallback.
+ * Providers (Settings page, env fallback):
+ * - b2         : Backblaze B2 (10GB free) via S3-compatible API
+ * - b2_cascade : B2 with automatic failover to a second S3-compatible provider
+ * - local      : server disk .data/books/ (zero-config dev/self-host)
  *
- * 2. Uploadthing (when UPLOADTHING_SECRET + UPLOADTHING_APP_ID set)
- *    2GB free. Server-side save falls back to local disk (direct browser
- *    uploads for UT are not wired in this app).
- *
- * 3. Local disk (default) — `.data/books/`, zero-config for dev/self-host.
- *
- * Books table records which provider + storage_id per file, so all backends
- * can coexist.
+ * COMPRESSION: book files (EPUB/PDF) are gzip-compressed CLIENT-SIDE before
+ * upload (double-zip: an EPUB is already a zip — gzipping the whole archive
+ * again reaps the remaining redundancy, typically 5-15% extra on real books,
+ * more on PDFs). Per-file `file_encoding` ('gzip'|'raw') records what is
+ * stored, so old uploads keep working and every read decompresses
+ * transparently. Video stays raw (incompressible) and streams with HTTP Range.
  */
 
-export type StorageProvider = "b2" | "uploadthing" | "local";
+export type StorageProvider = "b2" | "b2_cascade" | "local";
 
 export interface StoredFile {
   provider: StorageProvider;
-  storageId: string; // local: filename; b2: object key; uploadthing: file key
+  storageId: string;
 }
 
 const BOOKS_DIR = path.join(process.cwd(), ".data", "books");
 
-const isB2Configured = () =>
-  Boolean(process.env.B2_KEY_ID && process.env.B2_APPLICATION_KEY && process.env.B2_BUCKET_NAME);
-const isUploadthingConfigured = () =>
-  Boolean(process.env.UPLOADTHING_SECRET && process.env.UPLOADTHING_APP_ID);
+// ---------------- Provider configuration (settings -> env) ----------------
 
-export function activeStorageProvider(): StorageProvider {
-  if (isB2Configured()) return "b2";
-  if (isUploadthingConfigured()) return "uploadthing";
-  return "local";
-}
-
-// ============ S3-compatible (Backblaze B2 + optional cascade) ============
-
-interface S3Target {
-  client: S3Client;
+interface S3Config {
+  keyId: string;
+  appKey: string;
   bucket: string;
+  region: string;
+  endpoint?: string;
 }
 
-function primaryTarget(): S3Target {
-  const region = process.env.B2_REGION || "us-east-005";
-  return {
-    client: new S3Client({
-      region,
-      endpoint: `https://s3.${region}.backblazeb2.com`,
-      credentials: {
-        accessKeyId: process.env.B2_KEY_ID!,
-        secretAccessKey: process.env.B2_APPLICATION_KEY!,
-      },
-    }),
-    bucket: process.env.B2_BUCKET_NAME!,
-  };
+async function s3Config(): Promise<S3Config | null> {
+  const keyId = await resolveSetting("b2_key_id");
+  const appKey = await resolveSetting("b2_application_key");
+  const bucket = await resolveSetting("b2_bucket");
+  if (!keyId || !appKey || !bucket) return null;
+  const region = (await resolveSetting("b2_region")) || "us-east-005";
+  return { keyId, appKey, bucket, region };
 }
 
-function secondaryTarget(): S3Target | null {
-  if (!(process.env.B2_CASCADE_ENDPOINT && process.env.B2_CASCADE_KEY_ID && process.env.B2_CASCADE_SECRET && process.env.B2_CASCADE_BUCKET)) {
-    return null;
+async function cascadeConfig(): Promise<S3Config | null> {
+  const endpoint = await resolveSetting("b2_cascade_endpoint");
+  const keyId = await resolveSetting("b2_cascade_key_id");
+  const appKey = await resolveSetting("b2_cascade_secret");
+  const bucket = await resolveSetting("b2_cascade_bucket");
+  if (!endpoint || !keyId || !appKey || !bucket) return null;
+  const region = (await resolveSetting("b2_cascade_region")) || "us-east-1";
+  return { keyId, appKey, bucket, region, endpoint };
+}
+
+function clientFor(cfg: S3Config): S3Client {
+  return new S3Client({
+    region: cfg.region,
+    endpoint: cfg.endpoint ?? `https://s3.${cfg.region}.backblazeb2.com`,
+    credentials: { accessKeyId: cfg.keyId, secretAccessKey: cfg.appKey },
+  });
+}
+
+/** Which provider new uploads go to (settings override, else auto-detect). */
+export async function activeStorageProvider(): Promise<StorageProvider> {
+  const { resolveStorageProvider } = await import("./appsettings");
+  const p = await resolveStorageProvider();
+  return p === "b2_cascade" ? "b2" : p; // cascade is a read/failover partner; uploads still target B2
+}
+
+// ---------------- Compression helpers ----------------
+
+export interface CompressionResult {
+  data: Buffer;
+  encoding: "gzip" | "raw";
+  originalSize: number;
+}
+
+/** Try gzip; keep whichever is smaller (gains must clear a 3% threshold). */
+export function tryCompress(data: Buffer): CompressionResult {
+  if (data.byteLength < 512) return { data, encoding: "raw", originalSize: data.byteLength };
+  try {
+    const compressed = gzipSync(data, { level: 9 });
+    if (compressed.byteLength < data.byteLength * 0.97) {
+      return { data: compressed, encoding: "gzip", originalSize: data.byteLength };
+    }
+  } catch {
+    // fall through to raw
   }
-  return {
-    client: new S3Client({
-      endpoint: process.env.B2_CASCADE_ENDPOINT,
-      credentials: {
-        accessKeyId: process.env.B2_CASCADE_KEY_ID,
-        secretAccessKey: process.env.B2_CASCADE_SECRET,
-      },
-      region: process.env.B2_CASCADE_REGION || "us-east-1",
-    }),
-    bucket: process.env.B2_CASCADE_BUCKET,
-  };
+  return { data, encoding: "raw", originalSize: data.byteLength };
 }
+
+/** Decompress when the stored object is gzip-encoded. */
+export function tryDecompress(data: Buffer, encoding: string | null | undefined): Buffer {
+  if (encoding === "gzip") {
+    try {
+      return gunzipSync(data);
+    } catch (error) {
+      console.error("gunzip failed — serving raw bytes:", error);
+    }
+  }
+  return data;
+}
+
+// ---------------- Uploads ----------------
 
 export function bookObjectKey(bookId: string, fileType: string): string {
   return `books/${bookId}.${fileType}`;
 }
 
-async function streamToBuffer(stream: unknown): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  const s = stream as AsyncIterable<Uint8Array>;
-  for await (const chunk of s) chunks.push(Buffer.from(chunk));
-  return Buffer.concat(chunks);
-}
-
-// ============ Presigned direct uploads (bypasses body-size limits) ============
-
-/**
- * Creates a presigned PUT URL the browser can upload to directly.
- * Returns the storageId (object key) the client must send back to confirm.
- */
+/** Presigned PUT for the browser to upload directly to B2. */
 export async function createPresignedUpload(
   bookId: string,
   fileType: string,
   contentType: string
 ): Promise<{ uploadUrl: string; storageId: string; provider: StorageProvider } | null> {
+  const cfg = await s3Config();
+  if (!cfg) return null;
   const key = bookObjectKey(bookId, fileType);
-
-  if (isB2Configured()) {
-    const target = primaryTarget();
-    const command = new PutObjectCommand({
-      Bucket: target.bucket,
-      Key: key,
-      ContentType: contentType,
-    });
-    // 15 minutes is plenty for a 200MB upload; short window = less abuse surface
-    const uploadUrl = await getSignedUrl(target.client, command, { expiresIn: 900 });
-    return { uploadUrl, storageId: key, provider: "b2" };
-  }
-
-  return null; // caller falls back to server-side (local disk) upload
+  const command = new PutObjectCommand({ Bucket: cfg.bucket, Key: key, ContentType: contentType });
+  const uploadUrl = await getSignedUrl(clientFor(cfg), command, { expiresIn: 900 });
+  return { uploadUrl, storageId: key, provider: "b2" };
 }
 
-/** Verifies a file actually landed in B2 after a presigned upload. */
+/** Verifies a file landed in B2 after a presigned upload (stored/compressed size). */
 export async function verifyUpload(storageId: string): Promise<number | null> {
-  if (!isB2Configured()) return null;
-  const target = primaryTarget();
+  const cfg = await s3Config();
+  if (!cfg) return null;
   try {
-    const res = await target.client.send(
-      new HeadObjectCommand({ Bucket: target.bucket, Key: storageId })
+    const res = await clientFor(cfg).send(
+      new HeadObjectCommand({ Bucket: cfg.bucket, Key: storageId })
     );
     return res.ContentLength ?? null;
   } catch {
@@ -143,106 +149,83 @@ export async function verifyUpload(storageId: string): Promise<number | null> {
   }
 }
 
-// ============ Server-side save (local dev / fallback) ============
-
+/** Server-side save for the local provider (writes the payload as-is). */
 export async function saveBookFile(
   bookId: string,
   fileType: string,
-  data: Buffer,
-  contentType: string
+  payload: Buffer
 ): Promise<StoredFile> {
   const filename = `${bookId}.${fileType}`;
   await mkdir(BOOKS_DIR, { recursive: true });
-  await writeFile(path.join(BOOKS_DIR, filename), data);
+  await writeFile(path.join(BOOKS_DIR, filename), payload);
   return { provider: "local", storageId: filename };
 }
 
-// ============ Reads ============
+// ---------------- Reads (with transparent decompression) ----------------
 
 /**
- * Returns a readable stream of the book file.
- * For B2, streams straight from the object store (no full buffering).
- * For local, streams from disk.
+ * Read a book file and decode it to its ORIGINAL bytes. Books are loaded
+ * fully into memory by the reader anyway, so a Buffer is the natural shape.
+ * B2 reads fail over to the cascade provider when configured.
  */
-export async function openBookStream(
+export async function readBookFileDecoded(
   provider: string | null | undefined,
-  storageId: string
-): Promise<{ stream: Readable; size: number | null } | null> {
-  try {
-    if (provider === "b2" && isB2Configured()) {
-      const target = primaryTarget();
-      try {
-        const res = await target.client.send(
-          new GetObjectCommand({ Bucket: target.bucket, Key: storageId })
-        );
-        const body = res.Body as Readable;
-        return { stream: body, size: res.ContentLength ?? null };
-      } catch (err) {
-        const secondary = secondaryTarget();
-        if (!secondary) throw err;
-        const res = await secondary.client.send(
-          new GetObjectCommand({ Bucket: secondary.bucket, Key: storageId })
-        );
-        return { stream: res.Body as Readable, size: res.ContentLength ?? null };
-      }
-    }
-
-    const filePath = path.join(BOOKS_DIR, path.basename(storageId));
-    const info = await stat(filePath);
-    const stream = (await import("fs")).createReadStream(filePath) as Readable;
-    return { stream, size: info.size };
-  } catch (error) {
-    console.error("openBookStream failed:", error);
-    return null;
-  }
-}
-
-/** Whole-file read (kept for small-file use cases like cover art). */
-export async function readBookFile(
-  provider: string | null | undefined,
-  storageId: string
+  storageId: string,
+  encoding: string | null | undefined
 ): Promise<Buffer | null> {
   try {
-    if (provider === "b2" && isB2Configured()) {
-      const target = primaryTarget();
+    if (provider === "b2" || provider === "b2_cascade") {
+      const primary = await s3Config();
+      const secondary = await cascadeConfig();
       try {
-        const res = await target.client.send(
-          new GetObjectCommand({ Bucket: target.bucket, Key: storageId })
+        if (!primary) return null;
+        const res = await clientFor(primary).send(
+          new GetObjectCommand({ Bucket: primary.bucket, Key: storageId })
         );
-        return await streamToBuffer(res.Body);
+        return tryDecompress(await streamToBuffer(res.Body), encoding);
       } catch (err) {
-        const secondary = secondaryTarget();
         if (!secondary) throw err;
-        const res = await secondary.client.send(
+        const res = await clientFor(secondary).send(
           new GetObjectCommand({ Bucket: secondary.bucket, Key: storageId })
         );
-        return await streamToBuffer(res.Body);
+        return tryDecompress(await streamToBuffer(res.Body), encoding);
       }
     }
-    return await readFile(path.join(BOOKS_DIR, path.basename(storageId)));
+    const filePath = path.join(BOOKS_DIR, path.basename(storageId));
+    return tryDecompress(await readFile(filePath), encoding);
   } catch (error) {
-    console.error("readBookFile failed:", error);
+    console.error("readBookFileDecoded failed:", error);
     return null;
   }
 }
 
-// ============ Deletes ============
+// ---------------- Deletes ----------------
 
 export async function deleteBookFile(
   provider: string | null | undefined,
   storageId: string
 ): Promise<void> {
   try {
-    if (provider === "b2" && isB2Configured()) {
-      const target = primaryTarget();
-      try {
-        await target.client.send(new DeleteObjectCommand({ Bucket: target.bucket, Key: storageId }));
-      } catch {
-        const secondary = secondaryTarget();
-        if (secondary) {
-          await secondary.client.send(
+    if (provider === "b2" || provider === "b2_cascade") {
+      const primary = await s3Config();
+      const secondary = await cascadeConfig();
+      // The object may live on either side — try both, ignore misses.
+      if (primary) {
+        try {
+          await clientFor(primary).send(
+            new DeleteObjectCommand({ Bucket: primary.bucket, Key: storageId })
+          );
+        } catch {
+          // ignore
+        }
+      }
+      if (secondary) {
+        try {
+          await clientFor(secondary).send(
             new DeleteObjectCommand({ Bucket: secondary.bucket, Key: storageId })
           );
+        } catch {
+          // ignore
         }
       }
       return;
@@ -253,7 +236,7 @@ export async function deleteBookFile(
   }
 }
 
-// ============ Media streaming (HTTP Range) ============
+// ---------------- Media streaming (video, HTTP Range) ----------------
 
 export interface MediaRange {
   stream: Readable;
@@ -269,7 +252,6 @@ function parseRange(header: string | null, size: number): { start: number; end: 
   const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
   if (!m || (m[1] === "" && m[2] === "")) return null;
   if (m[1] === "") {
-    // suffix range: last N bytes
     const len = Number(m[2]);
     if (len === 0 || size === 0) return null;
     return { start: Math.max(0, size - len), end: size - 1 };
@@ -280,9 +262,24 @@ function parseRange(header: string | null, size: number): { start: number; end: 
   return { start, end };
 }
 
+function rangeResult(
+  body: Readable,
+  size: number | null,
+  rangeHeader: string | null
+): MediaRange {
+  const range = parseRange(rangeHeader, size ?? 0);
+  return {
+    stream: body,
+    size,
+    status: range && rangeHeader ? 206 : 200,
+    start: range?.start ?? 0,
+    end: range?.end ?? Math.max(0, (size ?? 1) - 1),
+  };
+}
+
 /**
- * Stream media with HTTP Range support — required for <video> seeking on MP4s.
- * B2 path forwards the Range header upstream; local path slices the file stream.
+ * Stream media with HTTP Range support — required for <video> seeking.
+ * Video is stored raw; no decompression on this path.
  */
 export async function openMediaStream(
   provider: string | null | undefined,
@@ -290,48 +287,32 @@ export async function openMediaStream(
   rangeHeader: string | null
 ): Promise<MediaRange | null> {
   try {
-    if (provider === "b2" && isB2Configured()) {
-      const target = primaryTarget();
+    if (provider === "b2" || provider === "b2_cascade") {
+      const primary = await s3Config();
+      const secondary = await cascadeConfig();
       try {
-        const res = await target.client.send(
+        if (!primary) return null;
+        const res = await clientFor(primary).send(
           new GetObjectCommand({
-            Bucket: target.bucket,
+            Bucket: primary.bucket,
             Key: storageId,
             ...(rangeHeader ? { Range: rangeHeader } : {}),
           })
         );
-        const size = res.ContentLength ?? null;
-        const range = parseRange(rangeHeader, size ?? 0);
-        return {
-          stream: res.Body as Readable,
-          size,
-          status: range && rangeHeader ? 206 : 200,
-          start: range?.start ?? 0,
-          end: range?.end ?? Math.max(0, (size ?? 1) - 1),
-        };
+        return rangeResult(res.Body as Readable, res.ContentLength ?? null, rangeHeader);
       } catch (err) {
-        const secondary = secondaryTarget();
         if (!secondary) throw err;
-        const res = await secondary.client.send(
+        const res = await clientFor(secondary).send(
           new GetObjectCommand({
             Bucket: secondary.bucket,
             Key: storageId,
             ...(rangeHeader ? { Range: rangeHeader } : {}),
           })
         );
-        const size = res.ContentLength ?? null;
-        const range = parseRange(rangeHeader, size ?? 0);
-        return {
-          stream: res.Body as Readable,
-          size,
-          status: range && rangeHeader ? 206 : 200,
-          start: range?.start ?? 0,
-          end: range?.end ?? Math.max(0, (size ?? 1) - 1),
-        };
+        return rangeResult(res.Body as Readable, res.ContentLength ?? null, rangeHeader);
       }
     }
 
-    // Local disk
     const filePath = path.join(BOOKS_DIR, path.basename(storageId));
     const info = await stat(filePath);
     const range = parseRange(rangeHeader, info.size);
@@ -348,4 +329,9 @@ export async function openMediaStream(
   }
 }
 
-export const isCloudStorageActive = isB2Configured;
+async function streamToBuffer(stream: unknown): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  const s = stream as AsyncIterable<Uint8Array>;
+  for await (const chunk of s) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}

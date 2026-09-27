@@ -44,7 +44,9 @@ export async function POST(req: NextRequest) {
   }
 
   await clearAttempts(ip);
-  const secret = process.env.JWT_SECRET || process.env.PASSWORD || "nightmare-library";
+  // Signing secret honors a runtime password override (from Settings).
+  const { effectiveSessionSecret } = await import("@/lib/appsettings");
+  const secret = await effectiveSessionSecret();
   const token = await createSessionToken(secret);
   const res = NextResponse.json({ success: true, redirect: "/dashboard" });
   res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions);

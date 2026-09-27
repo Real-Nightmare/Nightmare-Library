@@ -5,6 +5,7 @@ import {
   createPresignedUpload,
   verifyUpload,
   saveBookFile,
+  tryCompress,
 } from "@/lib/storage";
 
 export const runtime = "nodejs";
@@ -84,6 +85,10 @@ export async function POST(req: NextRequest) {
         author?: string | null;
         tags?: string | null;
         mediaType?: string;
+        /** What the browser actually stored: "gzip" (client-side) or "raw". */
+        encoding?: string;
+        /** Size of the ORIGINAL file before client-side compression. */
+        originalSize?: number;
       };
       try {
         body = await req.json();
@@ -105,8 +110,10 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ success: false, message: "Title is required" }, { status: 400 });
         }
 
-        const size = await verifyUpload(pending.storageId);
-        if (size === null) {
+        // verifyUpload returns the STORED size (compressed bytes when the
+        // browser uploaded gzip data directly to B2).
+        const storedSize = await verifyUpload(pending.storageId);
+        if (storedSize === null) {
           return NextResponse.json(
             { success: false, message: "File upload to storage did not complete" },
             { status: 400 }
@@ -114,6 +121,9 @@ export async function POST(req: NextRequest) {
         }
 
         pendingUploads.delete(body.uploadId);
+
+        const encoding = body.encoding === "gzip" ? "gzip" : "raw";
+        const originalSize = Number(body.originalSize) || (encoding === "gzip" ? 0 : storedSize);
 
         await insertBook({
           id: pending.bookId,
@@ -123,7 +133,10 @@ export async function POST(req: NextRequest) {
           storage_provider: "b2",
           storage_id: pending.storageId,
           file_type: pending.fileType,
-          file_size: size,
+          // file_size = bytes actually in storage; original_size = pre-compression size
+          file_size: storedSize,
+          original_size: encoding === "gzip" ? originalSize : null,
+          file_encoding: encoding,
           media_type: normalizeMediaType(body.mediaType, pending.fileType),
           uploaded_at: Date.now(),
         });
@@ -197,8 +210,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-    if (buffer.byteLength > 200 * 1024 * 1024) {
+    const rawBuffer = Buffer.from(await file.arrayBuffer());
+    if (rawBuffer.byteLength > 200 * 1024 * 1024) {
       return NextResponse.json(
         { success: false, message: "File too large (max 200MB)" },
         { status: 413 }
@@ -207,9 +220,22 @@ export async function POST(req: NextRequest) {
 
     const bookId = `book-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const fileType = ext;
-    const contentType = ext === "epub" ? EPUB_MIME : ext === "mp4" || ext === "webm" ? "video/mp4" : PDF_MIME;
 
-    const stored = await saveBookFile(bookId, fileType, buffer, contentType);
+    // Client may have already gzipped the file (CompressionStream). Otherwise
+    // the server applies the same gzip-or-keep-raw policy.
+    const declaredEncoding = (formData.get("encoding") as string | null)?.trim();
+    const declaredOriginal = Number(formData.get("originalSize")) || 0;
+    let payload: Buffer<ArrayBufferLike> = rawBuffer;
+    let encoding: "gzip" | "raw" = "raw";
+    if (declaredEncoding === "gzip") {
+      encoding = "gzip"; // bytes are already compressed
+    } else {
+      const compressed = tryCompress(rawBuffer);
+      payload = compressed.data;
+      encoding = compressed.encoding;
+    }
+
+    const stored = await saveBookFile(bookId, fileType, payload);
 
     const mediaType = (formData.get("mediaType") as string | null)?.trim();
     await insertBook({
@@ -220,7 +246,9 @@ export async function POST(req: NextRequest) {
       storage_provider: stored.provider,
       storage_id: stored.storageId,
       file_type: fileType,
-      file_size: buffer.byteLength,
+      file_size: payload.byteLength,
+      original_size: encoding === "gzip" ? declaredOriginal || rawBuffer.byteLength : null,
+      file_encoding: encoding,
       media_type: normalizeMediaType(mediaType, fileType),
       uploaded_at: Date.now(),
     });

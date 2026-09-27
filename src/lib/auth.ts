@@ -64,12 +64,15 @@ export async function verifySessionToken(
   if (Number(expiresAt) < Date.now()) return false;
   const expected = await hmac(secret, `${payload}.${expiresAt}`);
   return safeEqual(signature, expected);
-}
-
+}/**
+ * Password check against the EFFECTIVE site password: runtime override from
+ * Settings first, then the PASSWORD env var.
+ */
 export async function checkPassword(password: string): Promise<boolean> {
-  const expected = process.env.PASSWORD;
+  const { effectiveSitePassword } = await import("./appsettings");
+  const expected = await effectiveSitePassword();
   if (!expected) {
-    console.error("PASSWORD env var is not set — login is disabled");
+    console.error("No site password configured (settings override or PASSWORD env) — login disabled");
     return false;
   }
   return safeEqual(password, expected);

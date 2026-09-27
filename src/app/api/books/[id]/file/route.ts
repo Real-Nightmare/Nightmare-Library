@@ -1,15 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getBookStorage } from "@/lib/repo";
-import { openBookStream } from "@/lib/storage";
+import { readBookFileDecoded } from "@/lib/storage";
 
 export const runtime = "nodejs";
 
 type Params = { params: Promise<{ id: string }> };
 
 /**
- * GET /api/books/[id]/file — stream the book file for the reader.
- * B2 files stream straight from object storage (no full-file buffering),
- * keeping memory flat for 100MB+ books on serverless.
+ * GET /api/books/[id]/file — the book file for the reader, FULLY DECODED.
+ * Gzip-compressed uploads are decompressed here transparently, so the
+ * browser always receives the original EPUB/PDF bytes. Video never takes
+ * this path (it streams via /media).
  */
 export async function GET(_req: NextRequest, { params }: Params) {
   try {
@@ -20,8 +21,12 @@ export async function GET(_req: NextRequest, { params }: Params) {
       return NextResponse.json({ success: false, message: "Book not found" }, { status: 404 });
     }
 
-    const opened = await openBookStream(row.storage_provider, row.storage_id);
-    if (!opened) {
+    const data = await readBookFileDecoded(
+      (row as { storage_provider: string }).storage_provider,
+      row.storage_id,
+      (row as { file_encoding?: string }).file_encoding
+    );
+    if (!data) {
       return NextResponse.json({ success: false, message: "Book file missing" }, { status: 404 });
     }
 
@@ -33,10 +38,10 @@ export async function GET(_req: NextRequest, { params }: Params) {
       "Content-Disposition": `inline; filename="${filename}"`,
       "Cache-Control": "private, max-age=3600",
       "Accept-Ranges": "none",
+      "Content-Length": String(data.byteLength),
     };
-    if (opened.size != null) headers["Content-Length"] = String(opened.size);
 
-    return new NextResponse(opened.stream as unknown as ReadableStream, { headers });
+    return new NextResponse(new Uint8Array(data), { headers });
   } catch (error) {
     console.error("Book file error:", error);
     return NextResponse.json({ success: false, message: "Failed to load file" }, { status: 500 });
