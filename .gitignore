@@ -1,0 +1,15 @@
+node_modules/
+.next/
+out/
+next-env.d.ts
+
+# Local dev data (SQLite file + uploaded books)
+.data/
+
+# Platform runtime mirror (managed by Freebuff, not source)
+isolate/
+
+.env
+.env*.local
+*.tsbuildinfo
+.DS_Store
