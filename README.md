@@ -1,88 +1,91 @@
 # Nightmare Library
 
-## Overview
+A private, password-protected digital library for reading **EPUB** and **PDF** books and watching **anime** (official MP4/WebM uploads) — full-stack **Next.js**, deployable on **Freebuff hosting**.
 
-Nightmare Library is a private digital library application for managing and reading EPUB and PDF books. It features an obsidian-black theme and runs entirely on Cloudflare's free tier infrastructure. The application provides password-protected access, book uploading with multi-provider cloud storage, reading progress tracking, shelves/collections organization, and AI-powered features like genre suggestions and reading analytics.
+Obsidian-black theme, reading progress tracking, shelves/collections, favorites, in-book search, reading stats.
 
-## User Preferences
+## Library sections
 
-Preferred communication style: Simple, everyday language.
+Every item belongs to one of four sections (retag any item with the ⇄ button on its card):
 
-## System Architecture
+| Section | Contents |
+|---|---|
+| Books | Regular PDFs |
+| Light Novel (LN) | EPUB novels |
+| Manga | EPUB manga |
+| Anime (Official) | MP4/WebM video uploads, streamed with HTTP Range (seeking works) |
 
-### Frontend Architecture
-- **Static HTML/CSS/JS** served from the `src/` directory (login) and `frontend/` directory (dashboard/reader)
-- **Vanilla JavaScript** with ES6 modules - no framework dependencies
-- **Modular script organization**: Separate files for main dashboard logic, reader functionality, theme management, DOM helpers, and feature-specific modules (AI, analytics, search, TTS)
-- **XSS Prevention**: Uses safe DOM construction via `createElement` + `textContent` instead of innerHTML (see `frontend/scripts/dom-helpers.js`)
-- **Offline Support**: Service Worker (`frontend/sw.js`) caches static assets and API responses
+Schema migration for existing Supabase projects: re-run `database/supabase_schema.sql` in the SQL editor (it is idempotent — adds `books.media_type`).
 
-### Backend Architecture
-- **Cloudflare Pages Functions** using Hono framework (v4.6.13)
-- **File-based routing** in `functions/` directory - each `.ts` file maps to an API endpoint
-- **Middleware layer** (`functions/_middleware.ts`) handles authentication, session validation, and route protection
-- **Catch-all route** (`functions/[[path]].ts`) provides fallback API handling with CORS and security headers
+## What changed from the Cloudflare version
 
-### Database Strategy - Sharded D1
-- **10 Cloudflare D1 databases** (DB_1 through DB_10) providing 5GB total storage
-- **Consistent hashing** via `functions/db-router.ts` determines which database stores each book based on book ID
-- **DatabaseRouter class** provides unified query interface across all shards
-- `queryForBook(bookId)` - routes to correct shard for single-book operations
-- `queryAll(sql)` - aggregates results from all 10 databases for listing/search
+| Before (Cloudflare) | Now (Freebuff / Next.js) |
+|---|---|
+| 10 sharded D1 databases + broken `env.DB` bug | Single SQLite database via **libSQL** — same schema, one source of truth |
+| 10-provider storage cascade (Mega stub, OAuth token churn) | Local disk storage by default, **Uploadthing** (2GB free, no card) optional in production |
+| Two duplicate auth implementations with different rate limits | One auth API: signed HMAC session cookie, IP rate limiting (10 tries / 15 min) |
+| Vanilla JS + no real EPUB support (iframe to a blob) | Real EPUB rendering with **epub.js**, page/percentage progress, in-book search |
+| Docs referencing files that didn't exist | Everything in this README is real |
 
-### File Storage Architecture
-- **10-provider cascading fallback system** defined in `functions/storage-proxy.ts`
-- Priority order: Google Drive → Dropbox → OneDrive → pCloud → Box → Yandex Disk → Koofr → Backblaze B2 → Mega.nz → GitHub
-- Each provider configured via environment variables
-- Files stored externally; database only stores `storage_provider` and `storage_id` references
+## Environment variables
 
-### Authentication & Security
-- **Single password authentication** - no user accounts, just one library password
-- **KV-based sessions** stored in `KV_SESSIONS` namespace
-- **Rate limiting** with lockout after 5 failed attempts (15-minute lockout)
-- **Optional 2FA** layer via `functions/api/security/two-factor.ts`
-- **Secure headers** applied via Hono middleware (CSP, HSTS, X-Frame-Options)
+Set in **Freebuff → Settings → Environment** (or a local `.env.local` for dev):
 
-### Key API Endpoints
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/auth` | POST | Login with password |
-| `/api/books/list` | GET | List all books (aggregated from all shards) |
-| `/api/books/upload` | POST | Upload new book file |
-| `/api/books/get` | GET | Retrieve book file for reading |
-| `/api/books/progress` | GET/POST | Read/save reading progress |
-| `/api/shelves/*` | Various | Manage book collections |
-| `/api/ai/*` | Various | Genre suggestions, recommendations, analytics |
+| Variable | Required | Purpose |
+|---|---|---|
+| `PASSWORD` | Yes | Library login password |
+| `JWT_SECRET` | Recommended | Session token signing secret (falls back to `PASSWORD` if unset) |
+| `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` | Optional | Use Turso (free 5GB, no card) instead of local SQLite file |
+| `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` | Optional | Use Supabase Postgres (free, no card) as the database — recommended for serverless production. Run `database/supabase_schema.sql` in the Supabase SQL editor once |
+| `B2_KEY_ID` + `B2_APPLICATION_KEY` + `B2_BUCKET_NAME` | Optional | Backblaze B2 book storage — 10GB free, no card, S3-compatible |
+| `B2_REGION` | Optional | B2 region (default `us-east-005`) |
+| `B2_CASCADE_*` | Optional | Second S3-compatible provider (endpoint, key id, secret, bucket) used when B2 fails — for scaling past 10GB |
+| `UPLOADTHING_SECRET` + `UPLOADTHING_APP_ID` | Optional | Uploadthing (2GB free) — currently server-side only as local fallback |
 
-## External Dependencies
+With nothing but `PASSWORD` set, the app runs fully self-contained (local SQLite + local disk).
 
-### Cloudflare Services (Free Tier)
-- **Cloudflare Pages** - Static hosting and serverless functions
-- **Cloudflare D1** - SQLite databases (10 instances for sharding)
-- **Cloudflare KV** - Session storage (`KV_SESSIONS`) and caching (`KV_CACHE`, `KV_RATE_LIMIT`)
+## Running locally
 
-### NPM Dependencies
-- **hono** (^4.6.13) - Lightweight web framework for Cloudflare Workers
-- **@cloudflare/workers-types** (dev) - TypeScript types for Workers APIs
-- **wrangler** (dev) - Cloudflare development and deployment CLI
-
-### Cloud Storage Providers (User-Configured)
-All storage providers require user-provided OAuth tokens or API keys:
-- Google Drive, Dropbox, OneDrive, pCloud, Box
-- Yandex Disk, Koofr, Backblaze B2, Mega.nz
-- GitHub (fallback, 4GB limit per repo)
-
-### Required Environment Variables
-```
-PASSWORD          - Library access password
-JWT_SECRET        - Session token signing key
-GDRIVE_ACCESS_TOKEN, GDRIVE_FOLDER_ID    - Google Drive credentials
-DROPBOX_ACCESS_TOKEN, DROPBOX_PATH       - Dropbox credentials
-# ... additional storage provider credentials as needed
+```bash
+bun install
+bun run dev
 ```
 
-### Database Bindings (Cloudflare Dashboard)
-D1 databases must be bound as `DB_1` through `DB_10` in Cloudflare Pages settings.
-### Environment Recovery
-If replit.nix is missing, the environment has been restored using absolute paths for Python and Bun in the workflows. 
-To manually re-sync, please use the 'Packages' tab in the Replit sidebar to re-add Python, Node.js, and Bun.
+Then open http://localhost:3000 and log in with your `PASSWORD`.
+
+## Deploying on Freebuff
+
+1. `freebuff-preview set-install "bun install"` (already the default)
+2. `freebuff-preview set "bun run dev" 3000`
+3. `freebuff-preview set-build "bun run build"`
+4. `freebuff-deploy check` → `freebuff-deploy start`
+
+## API surface
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| POST | `/api/auth` | Login (rate-limited) |
+| DELETE | `/api/auth` | Logout |
+| GET | `/api/books` | List all books with progress |
+| POST | `/api/books` | Upload EPUB/PDF/MP4 (≤200MB, presigned to B2 when configured) |
+| GET | `/api/books/:id` | Book metadata |
+| DELETE | `/api/books/:id` | Delete book + file |
+| GET | `/api/books/:id/file` | Stream book file to reader |
+| GET | `/api/books/:id/media` | Range-capable video streaming |
+| GET/POST | `/api/books/:id/progress` | Reading progress |
+| PATCH | `/api/books/:id/update` | Title/author/tags/favorite/media_type |
+| GET | `/api/books/:id/search?q=` | In-book content search |
+| GET/POST | `/api/shelves` | List/create shelves |
+| GET/POST/DELETE | `/api/shelves/:id/books` | Manage shelf membership |
+| POST | `/api/ai/genre` | Keyword-based genre suggestions |
+| GET | `/api/stats` | Library statistics |
+
+## Recommended free tools (no credit card)
+
+| Need | Tool | Free tier |
+|---|---|---|
+| Database | **Turso** (turso.tech) | 5GB SQLite, 500M row reads/mo |
+| Book file storage | **Uploadthing** (uploadthing.com) | 2GB, direct-to-storage uploads |
+| Alternative storage | **Vercel Blob** | 1GB on Hobby |
+| Alternative DB | **Neon** (neon.tech) | Free Postgres (schema rewrite needed) |
+| Alternative full-stack host | **Vercel Hobby** | Free forever, non-commercial, 4.5MB body limit |

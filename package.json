@@ -1,18 +1,28 @@
 {
   "name": "nightmare-library",
-  "version": "1.0.0",
-  "type": "module",
+  "version": "2.0.0",
+  "private": true,
   "scripts": {
-    "dev": "wrangler pages dev . --compatibility-date=2024-01-01 --ip 0.0.0.0 --port 5000",
-    "build": "echo 'No build step required for Cloudflare Pages'",
-    "deploy": "wrangler pages deploy .",
-    "types": "wrangler types"
+    "dev": "next dev -H 0.0.0.0 -p ${PORT:-3000}",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0 -p ${PORT:-3000}",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "hono": "^4.11.4"
+    "@aws-sdk/client-s3": "^3.1141.0",
+    "@aws-sdk/s3-request-presigner": "^3.1141.0",
+    "@libsql/client": "^0.15.4",
+    "@supabase/supabase-js": "^2.117.2",
+    "epubjs": "^0.3.93",
+    "next": "^15.3.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250909.0",
-    "wrangler": "^3.114.4"
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "typescript": "^5.8.3"
   }
 }

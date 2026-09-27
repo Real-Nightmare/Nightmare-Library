@@ -1,6 +1,0 @@
-model: "ollama/deepseek-r1:1.5b"
-api_base: "http://0.0.0.0:11434/v1"
-context_window: 4096
-max_tokens: 1024
-offline: true
-auto_run: false
