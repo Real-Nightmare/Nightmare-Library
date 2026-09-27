@@ -329,6 +329,29 @@ export default function DashboardPage() {
         </div>
       </nav>
 
+      {/* Mobile-only section navigation (hidden ≥640px via CSS) — keeps
+          sections, filters and shelves reachable when the sidebar hides. */}
+      <div className="mobile-sections">
+        {([{ key: "all" as Filter, label: "All", icon: "✦" }, ...SECTIONS]).map((s) => (
+          <button
+            key={s.key}
+            className={`mobile-chip ${filter === s.key ? "active" : ""}`}
+            onClick={() => setFilter(s.key)}
+          >
+            {s.icon} {s.label}
+          </button>
+        ))}
+        {shelves.map((s) => (
+          <button
+            key={s.id}
+            className={`mobile-chip ${filter === `shelf:${s.id}` ? "active" : ""}`}
+            onClick={() => setFilter(`shelf:${s.id}`)}
+          >
+            {s.name}
+          </button>
+        ))}
+      </div>
+
       <div className="dashboard-layout">
         <aside className="sidebar">
           <div className="sidebar-section">

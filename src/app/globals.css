@@ -817,7 +817,44 @@ body {
 }
 
 /* ============ Responsive ============ */
+/* Mobile-only horizontal section navigation */
+.mobile-sections {
+  display: none;
+}
+
 @media (max-width: 640px) {
+  .mobile-sections {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    scrollbar-width: none;
+  }
+
+  .mobile-sections::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mobile-chip {
+    flex-shrink: 0;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .mobile-chip.active {
+    background: var(--accent-gradient);
+    color: white;
+    border-color: transparent;
+  }
+
   .sidebar {
     display: none;
   }
@@ -832,11 +869,41 @@ body {
   }
 
   .navbar {
-    padding: 0 16px;
+    padding: 0 12px;
+    gap: 8px;
+  }
+
+  .nav-brand {
+    font-size: 15px;
+    gap: 6px;
+  }
+
+  .nav-actions {
+    gap: 6px;
+  }
+
+  .nav-actions .btn-icon {
+    width: 32px;
+    height: 32px;
   }
 
   .book-title-bar {
     max-width: 140px;
+  }
+
+  .settings-main {
+    padding: 16px 14px 48px;
+  }
+
+  .settings-card {
+    padding: 16px;
+  }
+}
+
+/* Very small phones (<=340px): shrink text further so the navbar never wraps */
+@media (max-width: 340px) {
+  .nav-brand {
+    font-size: 13px;
   }
 }
 
