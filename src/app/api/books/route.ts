@@ -6,7 +6,9 @@ import {
   verifyUpload,
   saveBookFile,
   tryCompress,
+  tryDecompress,
 } from "@/lib/storage";
+import { extractCover, saveCover } from "@/lib/cover";
 
 export const runtime = "nodejs";
 
@@ -125,6 +127,21 @@ export async function POST(req: NextRequest) {
         const encoding = body.encoding === "gzip" ? "gzip" : "raw";
         const originalSize = Number(body.originalSize) || (encoding === "gzip" ? 0 : storedSize);
 
+        // Cover extraction (EPUB only, best-effort): pull the original bytes
+        // back from storage and grab the manifest-declared cover image.
+        let coverUrl: string | null = null;
+        if (pending.fileType === "epub") {
+          const { readBookFileDecoded } = await import("@/lib/storage");
+          const original = await readBookFileDecoded("b2", pending.storageId, encoding);
+          if (original) {
+            const cover = await extractCover("epub", original);
+            if (cover) {
+              await saveCover(pending.bookId, cover);
+              coverUrl = `/api/books/${pending.bookId}/cover`;
+            }
+          }
+        }
+
         await insertBook({
           id: pending.bookId,
           title,
@@ -138,6 +155,7 @@ export async function POST(req: NextRequest) {
           original_size: encoding === "gzip" ? originalSize : null,
           file_encoding: encoding,
           media_type: normalizeMediaType(body.mediaType, pending.fileType),
+          cover_url: coverUrl,
           uploaded_at: Date.now(),
         });
 
@@ -237,6 +255,17 @@ export async function POST(req: NextRequest) {
 
     const stored = await saveBookFile(bookId, fileType, payload);
 
+    // Cover extraction (EPUB only, best-effort) from the ORIGINAL bytes.
+    let coverUrl: string | null = null;
+    if (fileType === "epub") {
+      const original = encoding === "gzip" ? tryDecompress(payload, "gzip") : rawBuffer;
+      const cover = await extractCover("epub", original);
+      if (cover) {
+        await saveCover(bookId, cover);
+        coverUrl = `/api/books/${bookId}/cover`;
+      }
+    }
+
     const mediaType = (formData.get("mediaType") as string | null)?.trim();
     await insertBook({
       id: bookId,
@@ -250,6 +279,7 @@ export async function POST(req: NextRequest) {
       original_size: encoding === "gzip" ? declaredOriginal || rawBuffer.byteLength : null,
       file_encoding: encoding,
       media_type: normalizeMediaType(mediaType, fileType),
+      cover_url: coverUrl,
       uploaded_at: Date.now(),
     });
 

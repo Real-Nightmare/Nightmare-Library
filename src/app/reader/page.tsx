@@ -147,6 +147,31 @@ function ReaderInner() {
     return () => clearInterval(interval);
   }, [saveProgress]);
 
+  // Reading-session heartbeat: extends the current session every 2 minutes;
+  // a final beacon fires on tab close. The server merges heartbeats within
+  // a 5-minute window into one session.
+  useEffect(() => {
+    if (!id) return;
+    const beat = () => {
+      fetch("/api/stats/heartbeat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bookId: id }),
+        keepalive: true,
+      }).catch(() => {});
+    };
+    beat(); // open a session immediately
+    const interval = setInterval(beat, 2 * 60 * 1000);
+    const onHide = () => {
+      if (document.visibilityState === "hidden") beat();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onHide);
+    };
+  }, [id]);
+
   const changeFont = (delta: number) => {
     setFontSize((prev) => {
       const next = Math.max(10, Math.min(28, prev + delta));

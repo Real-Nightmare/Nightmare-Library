@@ -49,6 +49,8 @@ export interface NewBook {
   original_size?: number | null;
   /** "gzip" when the stored object is gzipped, "raw" otherwise. */
   file_encoding?: "gzip" | "raw";
+  /** Cover image path (e.g. /api/books/:id/cover) when extracted at upload. */
+  cover_url?: string | null;
   media_type?: string;
   uploaded_at: number;
 }
@@ -140,6 +142,7 @@ export async function insertBook(book: NewBook): Promise<void> {
       original_size: book.original_size ?? null,
       file_encoding: book.file_encoding || "raw",
       media_type: book.media_type || "book",
+      cover_url: book.cover_url ?? null,
       uploaded_at: book.uploaded_at,
     });
     if (error) throw new Error(error.message);
@@ -147,8 +150,8 @@ export async function insertBook(book: NewBook): Promise<void> {
   }
 
   await (await sql()).execute({
-    sql: `INSERT INTO books (id, title, author, storage_provider, storage_id, file_type, file_size, original_size, file_encoding, tags, media_type, uploaded_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT INTO books (id, title, author, storage_provider, storage_id, file_type, file_size, original_size, file_encoding, tags, media_type, cover_url, uploaded_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       book.id,
       book.title,
@@ -161,6 +164,7 @@ export async function insertBook(book: NewBook): Promise<void> {
       book.file_encoding || "raw",
       book.tags,
       book.media_type || "book",
+      book.cover_url ?? null,
       book.uploaded_at,
     ],
   });
@@ -447,6 +451,116 @@ export async function listShelfBooks(
     args: [shelfId],
   });
   return result.rows.map((r) => r as never);
+}
+
+// ======================= Reading sessions =======================
+
+export interface ReadingSession {
+  id: number;
+  book_id: string;
+  session_start: number;
+  session_end: number;
+  pages_read: number;
+}
+
+/**
+ * Append/extend a reading session.
+ * `extendWindowMs` merges heartbeats into the previous session when they are
+ * closer together than the window (i.e. continuous reading), otherwise a new
+ * session row starts. Supabase has no INSERT OR IGNORE-equivalent for the
+ * extend case, so the "extend" decision happens in code for both drivers.
+ */
+export async function recordReadingHeartbeat(
+  bookId: string,
+  at: number,
+  extendWindowMs = 5 * 60 * 1000
+): Promise<void> {
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
+    const { data: last } = await sb
+      .from("reading_stats")
+      .select("id, session_end")
+      .eq("book_id", bookId)
+      .order("session_start", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const lastRow = last as { id: number; session_end: number | null } | null;
+    if (lastRow?.id && lastRow.session_end && at - Number(lastRow.session_end) <= extendWindowMs) {
+      const { error } = await sb
+        .from("reading_stats")
+        .update({ session_end: at })
+        .eq("id", lastRow.id);
+      if (error) throw new Error(error.message);
+      return;
+    }
+    const { error } = await sb.from("reading_stats").insert({
+      book_id: bookId,
+      session_start: at,
+      session_end: at,
+      pages_read: 0,
+    });
+    if (error) throw new Error(error.message);
+    return;
+  }
+
+  const db = await sql();
+  const last = await db.execute({
+    sql: "SELECT id, session_end FROM reading_stats WHERE book_id = ? ORDER BY session_start DESC LIMIT 1",
+    args: [bookId],
+  });
+  const lastRow = last.rows[0] as unknown as { id: number; session_end: number | null } | undefined;
+  if (lastRow?.id && lastRow.session_end && at - Number(lastRow.session_end) <= extendWindowMs) {
+    await db.execute({ sql: "UPDATE reading_stats SET session_end = ? WHERE id = ?", args: [at, lastRow.id] });
+    return;
+  }
+  await db.execute({
+    sql: "INSERT INTO reading_stats (book_id, session_start, session_end, pages_read) VALUES (?, ?, ?, 0)",
+    args: [bookId, at, at],
+  });
+}
+
+/** Last N days of reading activity: minutes read per day, oldest first. */
+export async function getReadingActivity(
+  days = 14
+): Promise<{ date: string; minutes: number }[]> {
+  const since = Date.now() - days * 24 * 60 * 60 * 1000;
+  const out = new Map<string, number>();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+    out.set(d.toISOString().slice(0, 10), 0);
+  }
+
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
+    const { data, error } = await sb
+      .from("reading_stats")
+      .select("session_start, session_end")
+      .gte("session_start", since);
+    if (error) throw new Error(error.message);
+    for (const row of (data || []) as { session_start: number; session_end: number | null }[]) {
+      const day = new Date(Number(row.session_start)).toISOString().slice(0, 10);
+      if (!out.has(day)) continue;
+      const end = Number(row.session_end ?? row.session_start);
+      out.set(day, (out.get(day) || 0) + Math.max(0, (end - Number(row.session_start)) / 60000));
+    }
+  } else {
+    const db = await sql();
+    const res = await db.execute({
+      sql: "SELECT session_start, session_end FROM reading_stats WHERE session_start >= ?",
+      args: [since],
+    });
+    for (const row of res.rows as unknown as { session_start: number; session_end: number | null }[]) {
+      const day = new Date(Number(row.session_start)).toISOString().slice(0, 10);
+      if (!out.has(day)) continue;
+      const end = Number(row.session_end ?? row.session_start);
+      out.set(day, (out.get(day) || 0) + Math.max(0, (end - Number(row.session_start)) / 60000));
+    }
+  }
+
+  return Array.from(out.entries()).map(([date, minutes]) => ({
+    date,
+    minutes: Math.round(minutes * 10) / 10,
+  }));
 }
 
 // ======================= Stats =======================

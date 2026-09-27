@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getBook, deleteBookRow, getBookStorage } from "@/lib/repo";
 import { deleteBookFile } from "@/lib/storage";
+import { deleteCover } from "@/lib/cover";
 
 export const runtime = "nodejs";
 
@@ -34,6 +35,7 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
     }
 
     await deleteBookFile(book.storage_provider, book.storage_id);
+    await deleteCover(id);
     await deleteBookRow(id);
 
     return NextResponse.json({ success: true });

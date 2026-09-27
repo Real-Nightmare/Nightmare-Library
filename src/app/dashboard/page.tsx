@@ -64,6 +64,7 @@ export default function DashboardPage() {
   const [uploadMediaType, setUploadMediaType] = useState("book");
   const [newShelfName, setNewShelfName] = useState("");
   const [showShelfInput, setShowShelfInput] = useState(false);
+  const [activity, setActivity] = useState<{ date: string; minutes: number }[]>([]);
 
   const loadBooks = useCallback(async () => {
     try {
@@ -90,6 +91,10 @@ export default function DashboardPage() {
   useEffect(() => {
     loadBooks();
     loadShelves();
+    fetch("/api/stats")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setActivity(d?.stats?.activity || []))
+      .catch(() => {});
   }, [loadBooks, loadShelves]);
 
   const isVideo = (b: Book) => b.file_type === "mp4" || b.file_type === "webm" || b.file_type === "m4v";
@@ -298,6 +303,10 @@ export default function DashboardPage() {
   const countFor = (f: Filter) =>
     f === "all" ? (books || []).length : (books || []).filter((b) => b.media_type === f.slice(4)).length;
 
+  // Reading-activity chart geometry (pure SVG, no chart lib).
+  const MAX_MIN = Math.max(30, ...activity.map((a) => a.minutes));
+  const chartH = 64;
+
   return (
     <div className="page-body">
       <nav className="navbar">
@@ -471,6 +480,39 @@ export default function DashboardPage() {
               </button>
             </div>
           </div>
+
+          {activity.some((a) => a.minutes > 0) && (
+            <div className="activity-card">
+              <div className="activity-header">
+                <span className="activity-title">Reading — last 14 days</span>
+                <span className="activity-total">
+                  {Math.round(activity.reduce((s, a) => s + a.minutes, 0))} min
+                </span>
+              </div>
+              <svg className="activity-chart" viewBox={`0 0 ${activity.length * 24} ${chartH}`} preserveAspectRatio="none">
+                {activity.map((a, i) => {
+                  const h = Math.max(2, (a.minutes / MAX_MIN) * (chartH - 6));
+                  return (
+                    <rect
+                      key={a.date}
+                      x={i * 24 + 4}
+                      y={chartH - h}
+                      width={16}
+                      height={h}
+                      rx={3}
+                      className="activity-bar"
+                    >
+                      <title>{`${a.date}: ${a.minutes} min`}</title>
+                    </rect>
+                  );
+                })}
+              </svg>
+              <div className="activity-axis">
+                <span>{activity[0]?.date.slice(5)}</span>
+                <span>today</span>
+              </div>
+            </div>
+          )}
 
           {books === null ? (
             <div className="loading-state">
