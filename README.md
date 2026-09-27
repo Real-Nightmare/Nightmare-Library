@@ -2,7 +2,7 @@
 
 A private, password-protected digital library for reading **EPUB** and **PDF** books and watching **anime** (official MP4/WebM uploads) — full-stack **Next.js**, deployable on **Freebuff hosting**.
 
-Obsidian-black theme, reading progress tracking, shelves/collections, favorites, in-book search, reading stats.
+Obsidian-black theme, reading progress tracking, shelves/collections, favorites, in-book search, reading stats, **runtime provider switching** and **transparent client-side compression**.
 
 ## Library sections
 
@@ -43,6 +43,20 @@ Set in **Freebuff → Settings → Environment** (or a local `.env.local` for de
 | `UPLOADTHING_SECRET` + `UPLOADTHING_APP_ID` | Optional | Uploadthing (2GB free) — currently server-side only as local fallback |
 
 With nothing but `PASSWORD` set, the app runs fully self-contained (local SQLite + local disk).
+
+## Settings page (runtime configuration)
+
+The **⚙️ Settings** page in the dashboard lets the owner, at runtime and without redeploying:
+
+- **Switch database provider** — Supabase Postgres, Turso (remote SQLite), or the local SQLite file. Connectivity is tested before saving.
+- **Switch storage provider** — Backblaze B2, B2 with cascade failover (a second S3-compatible provider used automatically when B2 fails), or server disk.
+- **Change the site password** — requires the current password; takes effect immediately and signs out all devices. Leave the new password blank to revert to the `PASSWORD` env var.
+
+Secrets are stored as masked values (first 3 chars + bullets) in the API responses and saved as overrides in the `app_settings` table; environment variables remain the fallback wherever no override exists. Resolution order: **settings override → env var → default**.
+
+### Upload compression (automatic)
+
+EPUB and PDF files are gzip-compressed in the browser (`CompressionStream`) before upload when that actually saves space (>3% gain; the server applies the same policy server-side otherwise). Per-file `file_encoding` records what is stored and every read decompresses transparently — the reader and downloads always receive original bytes. Typical savings: 5–15% beyond the EPUB's built-in zip, more on PDFs. Video is stored raw and streams with HTTP Range seeking.
 
 ## Running locally
 

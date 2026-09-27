@@ -7,10 +7,10 @@ export const runtime = "nodejs";
 /** GET /api/stats — library stats (counts, pages, favorites, storage) */
 export async function GET() {
   try {
-    const stats = await getStats();
+    const [stats, storageProvider] = await Promise.all([getStats(), activeStorageProvider()]);
     return NextResponse.json({
       success: true,
-      stats: { ...stats, storageProvider: activeStorageProvider() },
+      stats: { ...stats, storageProvider },
     });
   } catch (error) {
     console.error("Stats error:", error);

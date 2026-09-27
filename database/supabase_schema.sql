@@ -130,3 +130,25 @@ CREATE INDEX IF NOT EXISTS idx_reading_stats_book ON reading_stats(book_id);
 
 ALTER TABLE books ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'book';
 CREATE INDEX IF NOT EXISTS idx_books_media_type ON books(media_type);
+
+-- ============================================
+-- FILE COMPRESSION TRACKING
+-- file_encoding: 'gzip' when the stored object is client-side gzipped,
+-- 'raw' otherwise. original_size = pre-compression byte size.
+-- ============================================
+
+ALTER TABLE books ADD COLUMN IF NOT EXISTS file_encoding TEXT NOT NULL DEFAULT 'raw';
+ALTER TABLE books ADD COLUMN IF NOT EXISTS original_size BIGINT;
+
+-- ============================================
+-- RUNTIME SETTINGS (Settings page overrides)
+-- Stores runtime configuration: database/storage provider credentials and
+-- the site password override. Secrets are masked by the API and never
+-- returned in full.
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now()) * 1000)::bigint
+);

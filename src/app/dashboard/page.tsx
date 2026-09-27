@@ -117,6 +117,30 @@ export default function DashboardPage() {
       return;
     }
 
+    // ---- Client-side gzip for compressible book files ----
+    // EPUB is a zip and PDFs are zlib streams, but gzipping the whole archive
+    // again still shrinks them. The server keeps whichever encoding is
+    // smaller and decompresses transparently on every read.
+    const COMPRESSIBLE = fileType === "epub" || fileType === "pdf";
+    let payload: Blob = file;
+    let encoding = "raw";
+    let originalSize = file.size;
+    if (COMPRESSIBLE && typeof CompressionStream !== "undefined" && file.size >= 1024) {
+      try {
+        setUploadMsg("Compressing...");
+        const cs = new CompressionStream("gzip");
+        const stream = file.stream().pipeThrough(cs);
+        const compressed = await new Response(stream).blob();
+        if (compressed.size < file.size * 0.97) {
+          payload = compressed;
+          encoding = "gzip";
+        }
+      } catch {
+        // browser limitation — upload raw
+      }
+    }
+    setProgress(10);
+
     try {
       const presignRes = await fetch("/api/books", {
         method: "POST",
@@ -136,13 +160,13 @@ export default function DashboardPage() {
           );
           xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) {
-              setProgress(Math.max(5, Math.round((e.loaded / e.total) * 90)));
+              setProgress(Math.max(10, Math.round((e.loaded / e.total) * 85) + 5));
             }
           };
           xhr.onload = () =>
             xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`Storage upload failed (${xhr.status})`));
           xhr.onerror = () => reject(new Error("Storage upload failed"));
-          xhr.send(file);
+          xhr.send(payload);
         });
 
         setProgress(95);
@@ -154,6 +178,8 @@ export default function DashboardPage() {
             uploadId: presignData.uploadId,
             title: file.name.replace(/\.[^.]+$/, ""),
             mediaType: uploadMediaType,
+            encoding,
+            originalSize,
           }),
         });
         const confirmData = await confirmRes.json();
@@ -161,16 +187,22 @@ export default function DashboardPage() {
       } else {
         setUploadMsg("Uploading...");
         const formData = new FormData();
-        formData.append("file", file);
+        formData.append("file", payload, file.name);
         formData.append("title", file.name.replace(/\.[^.]+$/, ""));
         formData.append("mediaType", uploadMediaType);
+        formData.append("encoding", encoding);
+        formData.append("originalSize", String(originalSize));
         const res = await fetch("/api/books", { method: "POST", body: formData });
         const data = await res.json();
         if (!data.success) throw new Error(data.message || "Upload failed");
       }
 
       setProgress(100);
-      setUploadMsg("Upload complete!");
+      setUploadMsg(
+        encoding === "gzip"
+          ? `Upload complete! (saved ${Math.max(1, Math.round((1 - payload.size / originalSize) * 100))}% storage)`
+          : "Upload complete!"
+      );
       await loadBooks();
       setTimeout(() => {
         setUploadOpen(false);
@@ -274,6 +306,12 @@ export default function DashboardPage() {
           <span>Nightmare Library</span>
         </div>
         <div className="nav-actions">
+          <button className="btn-icon" onClick={() => router.push("/settings")} title="Settings">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
           <button className="btn-icon" onClick={() => setUploadOpen(true)} title="Upload Media">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />

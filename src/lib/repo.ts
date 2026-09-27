@@ -1,4 +1,4 @@
-import { getDb, ensureMigrated } from "./db";
+import { ensureMigrated, getDbAsync } from "./db";
 import { isSupabaseConfigured, getSupabase } from "./supabase";
 
 /**
@@ -12,6 +12,12 @@ import { isSupabaseConfigured, getSupabase } from "./supabase";
  * All functions return plain JSON-serializable objects so callers don't care
  * which driver is active.
  */
+
+/** SQLite driver handle honoring runtime provider selection (local/turso). */
+async function sql() {
+  await ensureMigrated();
+  return getDbAsync();
+}
 
 export interface BookRow {
   id: string;
@@ -37,7 +43,12 @@ export interface NewBook {
   storage_provider: string;
   storage_id: string;
   file_type: string;
+  /** Bytes actually stored (compressed size when gzip-encoded). */
   file_size: number;
+  /** Pre-compression size when the file is stored gzip-encoded. */
+  original_size?: number | null;
+  /** "gzip" when the stored object is gzipped, "raw" otherwise. */
+  file_encoding?: "gzip" | "raw";
   media_type?: string;
   uploaded_at: number;
 }
@@ -57,8 +68,8 @@ function normalizeBook(row: Record<string, unknown>): BookRow {
 // ======================= Books =======================
 
 export async function listBooks(): Promise<BookRow[]> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { data, error } = await sb
       .from("books")
       .select(
@@ -74,7 +85,7 @@ export async function listBooks(): Promise<BookRow[]> {
   }
 
   await ensureMigrated();
-  const result = await getDb().execute(`
+  const result = await (await sql()).execute(`
     SELECT b.id, b.title, b.author, b.tags, b.cover_url, b.file_type, b.media_type, b.file_size,
            b.total_pages, b.is_favorite, b.uploaded_at, b.last_read_at,
            COALESCE(p.percent, 0) as progress
@@ -86,8 +97,8 @@ export async function listBooks(): Promise<BookRow[]> {
 }
 
 export async function getBook(id: string): Promise<BookRow | null> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { data, error } = await sb
       .from("books")
       .select(
@@ -102,7 +113,7 @@ export async function getBook(id: string): Promise<BookRow | null> {
   }
 
   await ensureMigrated();
-  const result = await getDb().execute({
+  const result = await (await sql()).execute({
     sql: `SELECT b.id, b.title, b.author, b.tags, b.cover_url, b.file_type, b.media_type, b.file_size,
                  b.total_pages, b.is_favorite, b.uploaded_at, b.last_read_at,
                  COALESCE(p.percent, 0) as progress
@@ -115,8 +126,8 @@ export async function getBook(id: string): Promise<BookRow | null> {
 }
 
 export async function insertBook(book: NewBook): Promise<void> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { error } = await sb.from("books").insert({
       id: book.id,
       title: book.title,
@@ -126,6 +137,8 @@ export async function insertBook(book: NewBook): Promise<void> {
       storage_id: book.storage_id,
       file_type: book.file_type,
       file_size: book.file_size,
+      original_size: book.original_size ?? null,
+      file_encoding: book.file_encoding || "raw",
       media_type: book.media_type || "book",
       uploaded_at: book.uploaded_at,
     });
@@ -133,10 +146,9 @@ export async function insertBook(book: NewBook): Promise<void> {
     return;
   }
 
-  await ensureMigrated();
-  await getDb().execute({
-    sql: `INSERT INTO books (id, title, author, storage_provider, storage_id, file_type, file_size, tags, media_type, uploaded_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  await (await sql()).execute({
+    sql: `INSERT INTO books (id, title, author, storage_provider, storage_id, file_type, file_size, original_size, file_encoding, tags, media_type, uploaded_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       book.id,
       book.title,
@@ -145,6 +157,8 @@ export async function insertBook(book: NewBook): Promise<void> {
       book.storage_id,
       book.file_type,
       book.file_size,
+      book.original_size ?? null,
+      book.file_encoding || "raw",
       book.tags,
       book.media_type || "book",
       book.uploaded_at,
@@ -153,8 +167,8 @@ export async function insertBook(book: NewBook): Promise<void> {
 }
 
 export async function deleteBookRow(id: string): Promise<void> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     // progress + shelf_items + content index cascade via FKs
     const { error } = await sb.from("books").delete().eq("id", id);
     if (error) throw new Error(error.message);
@@ -162,7 +176,7 @@ export async function deleteBookRow(id: string): Promise<void> {
   }
 
   await ensureMigrated();
-  await getDb().execute({ sql: "DELETE FROM books WHERE id = ?", args: [id] });
+  await (await sql()).execute({ sql: "DELETE FROM books WHERE id = ?", args: [id] });
 }
 
 export async function updateBook(
@@ -171,8 +185,8 @@ export async function updateBook(
 ): Promise<void> {
   if (Object.keys(fields).length === 0) return;
 
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { error } = await sb.from("books").update(fields).eq("id", id);
     if (error) throw new Error(error.message);
     return;
@@ -187,43 +201,44 @@ export async function updateBook(
   if (fields.is_favorite !== undefined) { sets.push("is_favorite = ?"); args.push(fields.is_favorite ? 1 : 0); }
   if (fields.media_type !== undefined) { sets.push("media_type = ?"); args.push(fields.media_type); }
   args.push(id);
-  await getDb().execute({ sql: `UPDATE books SET ${sets.join(", ")} WHERE id = ?`, args });
+  await (await sql()).execute({ sql: `UPDATE books SET ${sets.join(", ")} WHERE id = ?`, args });
 }
 
 export async function getBookStorage(id: string): Promise<{
   storage_provider: string;
   storage_id: string;
   file_type: string;
+  file_encoding: string | null;
+  original_size: number | null;
   title: string;
 } | null> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { data, error } = await sb
       .from("books")
-      .select("storage_provider, storage_id, file_type, title")
+      .select("storage_provider, storage_id, file_type, file_encoding, original_size, title")
       .eq("id", id)
       .maybeSingle();
     if (error) throw new Error(error.message);
     return (data as never) || null;
   }
 
-  await ensureMigrated();
-  const result = await getDb().execute({
-    sql: "SELECT storage_provider, storage_id, file_type, title FROM books WHERE id = ?",
+  const result = await (await sql()).execute({
+    sql: "SELECT storage_provider, storage_id, file_type, file_encoding, original_size, title FROM books WHERE id = ?",
     args: [id],
   });
   return (result.rows[0] as never) || null;
 }
 
 export async function markBookRead(id: string, at: number): Promise<void> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { error } = await sb.from("books").update({ last_read_at: at }).eq("id", id);
     if (error) throw new Error(error.message);
     return;
   }
   await ensureMigrated();
-  await getDb().execute({
+  await (await sql()).execute({
     sql: "UPDATE books SET last_read_at = ? WHERE id = ?",
     args: [at, id],
   });
@@ -238,8 +253,8 @@ export async function saveProgress(
   chapter: string | null,
   at: number
 ): Promise<void> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { error } = await sb.from("progress").upsert(
       {
         book_id: bookId,
@@ -255,7 +270,7 @@ export async function saveProgress(
   }
 
   await ensureMigrated();
-  await getDb().execute({
+  await (await sql()).execute({
     sql: `INSERT INTO progress (book_id, percent, current_page, current_chapter, last_read_at)
           VALUES (?, ?, ?, ?, ?)
           ON CONFLICT(book_id) DO UPDATE SET
@@ -273,8 +288,8 @@ export async function getProgress(bookId: string): Promise<{
   current_chapter: string | null;
   last_read_at: number | null;
 }> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { data } = await sb
       .from("progress")
       .select("percent, current_page, current_chapter, last_read_at")
@@ -286,7 +301,7 @@ export async function getProgress(bookId: string): Promise<{
   }
 
   await ensureMigrated();
-  const result = await getDb().execute({
+  const result = await (await sql()).execute({
     sql: "SELECT percent, current_page, current_chapter, last_read_at FROM progress WHERE book_id = ?",
     args: [bookId],
   });
@@ -298,8 +313,8 @@ export async function getProgress(bookId: string): Promise<{
 export async function listShelves(): Promise<
   { id: string; name: string; color: string; position: number; book_count: number }[]
 > {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { data, error } = await sb
       .from("shelves")
       .select("id, name, color, position, shelf_items(count)")
@@ -319,7 +334,7 @@ export async function listShelves(): Promise<
   }
 
   await ensureMigrated();
-  const result = await getDb().execute(`
+  const result = await (await sql()).execute(`
     SELECT s.id, s.name, s.color, s.position, COUNT(si.book_id) as book_count
     FROM shelves s
     LEFT JOIN shelf_items si ON s.id = si.shelf_id
@@ -336,8 +351,8 @@ export async function createShelf(
 ): Promise<{ id: string; name: string; color: string; position: number }> {
   const id = `shelf-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { error } = await sb
       .from("shelves")
       .insert({ id, name, color, position, created_at: Date.now() });
@@ -346,7 +361,7 @@ export async function createShelf(
   }
 
   await ensureMigrated();
-  await getDb().execute({
+  await (await sql()).execute({
     sql: "INSERT INTO shelves (id, name, color, position, created_at) VALUES (?, ?, ?, ?, ?)",
     args: [id, name, color, position, Date.now()],
   });
@@ -354,19 +369,19 @@ export async function createShelf(
 }
 
 export async function nextShelfPosition(): Promise<number> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { count } = await sb.from("shelves").select("*", { count: "exact", head: true });
     return count ?? 0;
   }
   await ensureMigrated();
-  const r = await getDb().execute("SELECT COALESCE(MAX(position), -1) + 1 as pos FROM shelves");
+  const r = await (await sql()).execute("SELECT COALESCE(MAX(position), -1) + 1 as pos FROM shelves");
   return Number(r.rows[0].pos);
 }
 
 export async function addBookToShelf(shelfId: string, bookId: string): Promise<void> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { error } = await sb
       .from("shelf_items")
       .upsert({ shelf_id: shelfId, book_id: bookId, added_at: Date.now() }, { onConflict: "shelf_id,book_id" });
@@ -374,21 +389,21 @@ export async function addBookToShelf(shelfId: string, bookId: string): Promise<v
     return;
   }
   await ensureMigrated();
-  await getDb().execute({
+  await (await sql()).execute({
     sql: "INSERT OR IGNORE INTO shelf_items (shelf_id, book_id, added_at) VALUES (?, ?, ?)",
     args: [shelfId, bookId, Date.now()],
   });
 }
 
 export async function removeBookFromShelf(shelfId: string, bookId: string): Promise<void> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { error } = await sb.from("shelf_items").delete().match({ shelf_id: shelfId, book_id: bookId });
     if (error) throw new Error(error.message);
     return;
   }
   await ensureMigrated();
-  await getDb().execute({
+  await (await sql()).execute({
     sql: "DELETE FROM shelf_items WHERE shelf_id = ? AND book_id = ?",
     args: [shelfId, bookId],
   });
@@ -397,8 +412,8 @@ export async function removeBookFromShelf(shelfId: string, bookId: string): Prom
 export async function listShelfBooks(
   shelfId: string
 ): Promise<{ id: string; title: string; author: string | null; file_type: string; cover_url: string | null; progress: number }[]> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { data, error } = await sb
       .from("shelf_items")
       .select("book_id, books(id, title, author, file_type, cover_url, progress(percent))")
@@ -421,7 +436,7 @@ export async function listShelfBooks(
   }
 
   await ensureMigrated();
-  const result = await getDb().execute({
+  const result = await (await sql()).execute({
     sql: `SELECT b.id, b.title, b.author, b.file_type, b.cover_url,
                  COALESCE(p.percent, 0) as progress
           FROM shelf_items si
@@ -444,8 +459,8 @@ export async function getStats(): Promise<{
   storageUsedBytes: number;
   recent: { id: string; title: string; author: string | null; file_type: string }[];
 }> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const [countRes, pagesRes, favRes, progRes, sizeRes, recentRes] = await Promise.all([
       sb.from("books").select("*", { count: "exact", head: true }),
       sb.from("books").select("total_pages"),
@@ -467,7 +482,7 @@ export async function getStats(): Promise<{
   }
 
   await ensureMigrated();
-  const db = getDb();
+  const db = (await sql());
   const [books, pages, favs, prog, size, recent] = await Promise.all([
     db.execute("SELECT COUNT(*) as c FROM books"),
     db.execute("SELECT COALESCE(SUM(total_pages), 0) as c FROM books"),
@@ -487,8 +502,8 @@ export async function getStats(): Promise<{
 }
 
 export async function getLoginAttempts(ip: string): Promise<{ count: number; window_start: number } | null> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { data } = await sb
       .from("login_attempts")
       .select("count, window_start")
@@ -497,7 +512,7 @@ export async function getLoginAttempts(ip: string): Promise<{ count: number; win
     return (data as never) || null;
   }
   await ensureMigrated();
-  const r = await getDb().execute({
+  const r = await (await sql()).execute({
     sql: "SELECT count, window_start FROM login_attempts WHERE ip = ?",
     args: [ip],
   });
@@ -505,8 +520,8 @@ export async function getLoginAttempts(ip: string): Promise<{ count: number; win
 }
 
 export async function upsertLoginAttempts(ip: string, count: number, windowStart: number): Promise<void> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { error } = await sb
       .from("login_attempts")
       .upsert({ ip, count, window_start: windowStart }, { onConflict: "ip" });
@@ -514,7 +529,7 @@ export async function upsertLoginAttempts(ip: string, count: number, windowStart
     return;
   }
   await ensureMigrated();
-  await getDb().execute({
+  await (await sql()).execute({
     sql: `INSERT INTO login_attempts (ip, count, window_start) VALUES (?, ?, ?)
           ON CONFLICT(ip) DO UPDATE SET count = excluded.count, window_start = excluded.window_start`,
     args: [ip, count, windowStart],
@@ -522,13 +537,13 @@ export async function upsertLoginAttempts(ip: string, count: number, windowStart
 }
 
 export async function clearLoginAttempts(ip: string): Promise<void> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     await sb.from("login_attempts").delete().eq("ip", ip);
     return;
   }
   await ensureMigrated();
-  await getDb().execute({ sql: "DELETE FROM login_attempts WHERE ip = ?", args: [ip] });
+  await (await sql()).execute({ sql: "DELETE FROM login_attempts WHERE ip = ?", args: [ip] });
 }
 
 // ======================= Content search =======================
@@ -537,8 +552,8 @@ export async function searchBookContent(
   bookId: string,
   q: string
 ): Promise<{ chapter: string | null; snippet: string | null; position: number | null }[]> {
-  if (isSupabaseConfigured()) {
-    const sb = getSupabase();
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
     const { data, error } = await sb
       .from("book_content_index")
       .select("chapter, snippet, position")
@@ -550,7 +565,7 @@ export async function searchBookContent(
     return (data as never) || [];
   }
   await ensureMigrated();
-  const result = await getDb().execute({
+  const result = await (await sql()).execute({
     sql: `SELECT chapter, snippet, position FROM book_content_index
           WHERE book_id = ? AND (content_text LIKE ? OR snippet LIKE ?)
           ORDER BY position LIMIT 50`,
