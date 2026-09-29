@@ -614,6 +614,47 @@ h1, h2, h3 {
   color-scheme: dark;
 }
 
+.shelf-add-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 16px 8px;
+}
+
+.shelf-add-row .sidebar-input {
+  width: 100%;
+  margin: 0;
+  min-width: 0;
+  flex: 1;
+}
+
+.shelf-add-btn {
+  flex-shrink: 0;
+  padding: 8px 13px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg-primary);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--serif);
+  cursor: pointer;
+  transition: filter 0.15s ease, transform 0.1s ease;
+}
+
+.shelf-add-btn:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.shelf-add-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.shelf-add-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
 .sidebar-input:focus {
   outline: none;
   border-color: var(--accent-strong);

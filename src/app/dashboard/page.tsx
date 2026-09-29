@@ -683,23 +683,34 @@ export default function DashboardPage() {
               </button>
             </h3>
             {addShelfOpen && (
-              <input
-                className="sidebar-input"
-                value={newShelfName}
-                onChange={(e) => setNewShelfName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") createShelf();
-                  if (e.key === "Escape") setAddShelfOpen(false);
+              <form
+                className="shelf-add-row"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  createShelf();
                 }}
-                placeholder="Name a shelf, press Enter"
-                autoFocus
-                maxLength={60}
-              />
+              >
+                <input
+                  className="sidebar-input"
+                  value={newShelfName}
+                  onChange={(e) => setNewShelfName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setAddShelfOpen(false);
+                  }}
+                  placeholder="New shelf name"
+                  autoFocus
+                  maxLength={60}
+                  aria-label="New shelf name"
+                />
+                <button type="submit" className="shelf-add-btn" disabled={creatingShelf} aria-label="Create shelf">
+                  {creatingShelf ? "…" : "Add"}
+                </button>
+              </form>
             )}
             <ul className="sidebar-menu">
               {shelves.length === 0 ? (
                 <li className="sidebar-empty">
-                  {addShelfOpen ? "Type a name, press Enter" : "No shelves yet — tap +"}
+                  {addShelfOpen ? "Name it, then tap Add" : "No shelves yet — tap +"}
                 </li>
               ) : (
                 shelves.map((s) => (
