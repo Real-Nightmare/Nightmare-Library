@@ -143,16 +143,36 @@ function ReaderInner() {
           // relocated MUST be registered BEFORE display(): the first relocation
           // fires during display() and enables the footer buttons. Registering
           // after display() resolved is why the page buttons started disabled.
-          rendition.on("relocated", (location: { start: { percentage: number; displayed: { page: number }; href: string }; end: { percentage: number; displayed: { page: number } } }) => {
-            if (location?.start) {
-              const pct = location.start.percentage * 100;
-              percentRef.current = pct;
-              const page = location.start.displayed?.page;
-              const total = location.end?.displayed?.page ?? page;
-              setPageInfo(page ? `${page} / ${total || "?"}` : `${Math.round(pct)}%`);
-              setHasPrev(pct > 0.5);
-              setHasNext(pct < 99.5);
+          //
+          // NOTE: location.start.percentage is 0 until epub.locations.generate()
+          // has run — so it CANNOT be the only percent source. Without the spine
+          // fallback below, hasPrev stays false forever ("buttons don't work")
+          // and progress never saves ("Currently Reading" always empty).
+          rendition.on("relocated", (location: { start: { percentage: number; index?: number; displayed?: { page: number; total: number }; href: string }; end: { percentage: number; displayed?: { page: number; total: number } } }) => {
+            if (!location?.start) return;
+            const reported = location.start.percentage;
+            let pct: number;
+            if (Number.isFinite(reported) && reported > 0) {
+              pct = reported * 100;
+            } else {
+              // Fall back to spine position: chapter index plus fraction within
+              // the chapter (from its displayed page count).
+              const spineLen = epubRef.current?.spine?.length ?? 0;
+              const idx = location.start.index ?? 0;
+              const frac =
+                location.start.displayed && location.start.displayed.total > 0
+                  ? (location.start.displayed.page - 1) / location.start.displayed.total
+                  : 0;
+              pct = spineLen > 0 ? ((idx + frac) / spineLen) * 100 : 0;
             }
+            percentRef.current = Math.max(0, Math.min(100, pct));
+            const page = location.start.displayed?.page;
+            // displayed.total is the real per-section page count; the old code
+            // printed end-spread's page number here ("2 / 2" garbage).
+            const total = location.start.displayed?.total;
+            setPageInfo(page ? `${page} / ${total || "?"}` : `${Math.round(percentRef.current)}%`);
+            setHasPrev(percentRef.current > 0.5);
+            setHasNext(percentRef.current < 99.5);
           });
           await rendition.display();
           // Apply the user's theme (may have loaded from localStorage after mount).
@@ -173,13 +193,30 @@ function ReaderInner() {
           ro.observe(host);
           resizeObserverRef.current = ro;
 
+          // Generate locations so percentages and page numbers become real.
+          // Fresh reads do it in the background (the spine fallback above keeps
+          // buttons/progress working meanwhile); resumes await it to jump
+          // accurately to the saved position.
+          const gen = epub.locations
+            .generate(1024)
+            .then(() => {
+              if (cancelled) return;
+              try {
+                rendition.reportLocation?.();
+              } catch {
+                // rendition already torn down
+              }
+            })
+            .catch(() => {
+              // big/odd books can fail generation — spine fallback still works
+            });
           if (initialPercent > 0 && initialPercent < 100) {
             try {
-              await epub.locations.generate(1024);
+              await gen;
               const target = Math.floor((initialPercent / 100) * epub.locations.length());
-              if (target > 0) await rendition.display(target);
+              if (target > 0 && !cancelled) await rendition.display(target);
             } catch {
-              // locations generation can be slow for big books; skip resume silently
+              // skip resume silently; reader stays on page 1
             }
           }
         } else {
