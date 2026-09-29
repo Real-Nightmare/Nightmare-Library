@@ -30,7 +30,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { password } = body;
+  // Trim to match the change-password flow (which trims before storing), so a
+  // stray leading/trailing space from a mobile keyboard can't lock you out.
+  const password = typeof body.password === "string" ? body.password.trim() : "";
   if (!password) {
     return NextResponse.json({ success: false, message: "Password required" }, { status: 400 });
   }
