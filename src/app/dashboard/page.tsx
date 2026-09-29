@@ -237,7 +237,14 @@ export default function DashboardPage() {
           };
           xhr.onload = () =>
             xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`Storage upload failed (${xhr.status})`));
-          xhr.onerror = () => reject(new Error("Storage upload failed"));
+          xhr.onerror = () =>
+            reject(
+              new Error(
+                xhr.status === 0
+                  ? "Browser blocked the upload — the B2 bucket needs a CORS rule allowing PUT from this site"
+                  : "Storage upload failed"
+              )
+            );
           xhr.send(payload);
         });
 
