@@ -23,6 +23,20 @@ interface Shelf {
   book_count: number;
 }
 
+interface UploadQueueItem {
+  name: string;
+  status: "pending" | "compressing" | "uploading" | "processing" | "done" | "error";
+  percent: number;
+  message?: string;
+}
+
+interface UploadQueueItem {
+  name: string;
+  status: "pending" | "compressing" | "uploading" | "processing" | "done" | "error";
+  percent: number;
+  message?: string;
+}
+
 interface Stats {
   totalBooks: number;
   totalPages: number;
@@ -90,9 +104,8 @@ export default function DashboardPage() {
   const [view, setView] = useState<"grid" | "list">("grid");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [uploadMsg, setUploadMsg] = useState("");
   const [uploadMediaType, setUploadMediaType] = useState("book");
   const [newShelfName, setNewShelfName] = useState("");
   const [creatingShelf, setCreatingShelf] = useState(false);
@@ -168,11 +181,13 @@ export default function DashboardPage() {
     b.media_type === "anime_official" || isVideo(b) ? `/watch?id=${b.id}` : `/reader?id=${b.id}`;
 
   // ---------------- Upload ----------------
-  const handleUpload = async (file: File) => {
-    setUploading(true);
-    setProgress(5);
-    setUploadMsg("Preparing upload...");
-
+  // One file's journey: gzip (books) → presign → PUT to B2 → confirm.
+  // `onPhase` reports progress for the queue UI; throws on failure.
+  const uploadOne = async (
+    file: File,
+    mediaType: string,
+    onPhase: (status: UploadQueueItem["status"], percent: number, message?: string) => void
+  ) => {
     const name = file.name.toLowerCase();
     const fileType = name.endsWith(".epub")
       ? "epub"
@@ -186,9 +201,7 @@ export default function DashboardPage() {
               ? "m4v"
               : null;
     if (!fileType) {
-      setUploadMsg("Only EPUB, PDF and video files are supported.");
-      setUploading(false);
-      return;
+      throw new Error("Only EPUB, PDF and video files are supported");
     }
 
     // Client-side gzip for compressible book files; the server keeps
@@ -198,8 +211,8 @@ export default function DashboardPage() {
     let encoding = "raw";
     const originalSize = file.size;
     if (COMPRESSIBLE && typeof CompressionStream !== "undefined" && file.size >= 1024) {
+      onPhase("compressing", 5);
       try {
-        setUploadMsg("Compressing...");
         const cs = new CompressionStream("gzip");
         const stream = file.stream().pipeThrough(cs);
         const compressed = await new Response(stream).blob();
@@ -211,87 +224,111 @@ export default function DashboardPage() {
         // browser limitation — upload raw
       }
     }
-    setProgress(10);
 
-    try {
-      const presignRes = await fetch("/api/books", {
+    onPhase("uploading", 10);
+    const presignRes = await fetch("/api/books", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fileType, mediaType }),
+    });
+    const presignData = await presignRes.json();
+
+    if (presignData.success && presignData.presign) {
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", presignData.uploadUrl);
+        xhr.setRequestHeader(
+          "Content-Type",
+          fileType === "epub" ? "application/epub+zip" : fileType === "pdf" ? "application/pdf" : `video/${fileType === "webm" ? "webm" : "mp4"}`
+        );
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            onPhase("uploading", Math.max(10, Math.round((e.loaded / e.total) * 85) + 5));
+          }
+        };
+        xhr.onload = () =>
+          xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`Storage upload failed (${xhr.status})`));
+        xhr.onerror = () =>
+          reject(
+            new Error(
+              xhr.status === 0
+                ? "Browser blocked the upload — the B2 bucket needs a CORS rule allowing PUT from this site"
+                : "Storage upload failed"
+            )
+          );
+        xhr.send(payload);
+      });
+
+      onPhase("processing", 95);
+      // Confirm carries the presign facts with it, so the server never needs
+      // a same-instance memory lookup (serverless-safe).
+      const confirmRes = await fetch("/api/books", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileType, mediaType: uploadMediaType }),
+        body: JSON.stringify({
+          bookId: presignData.bookId,
+          storageId: presignData.storageId,
+          title: file.name.replace(/\.[^.]+$/, ""),
+          mediaType,
+          fileType,
+          encoding,
+          originalSize,
+        }),
       });
-      const presignData = await presignRes.json();
-
-      if (presignData.success && presignData.presign) {
-        setUploadMsg("Uploading to storage...");
-        await new Promise<void>((resolve, reject) => {
-          const xhr = new XMLHttpRequest();
-          xhr.open("PUT", presignData.uploadUrl);
-          xhr.setRequestHeader(
-            "Content-Type",
-            fileType === "epub" ? "application/epub+zip" : fileType === "pdf" ? "application/pdf" : `video/${fileType === "webm" ? "webm" : "mp4"}`
-          );
-          xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
-              setProgress(Math.max(10, Math.round((e.loaded / e.total) * 85) + 5));
-            }
-          };
-          xhr.onload = () =>
-            xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`Storage upload failed (${xhr.status})`));
-          xhr.onerror = () =>
-            reject(
-              new Error(
-                xhr.status === 0
-                  ? "Browser blocked the upload — the B2 bucket needs a CORS rule allowing PUT from this site"
-                  : "Storage upload failed"
-              )
-            );
-          xhr.send(payload);
-        });
-
-        setProgress(95);
-        setUploadMsg("Finalizing...");
-        const confirmRes = await fetch("/api/books", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            uploadId: presignData.uploadId,
-            title: file.name.replace(/\.[^.]+$/, ""),
-            mediaType: uploadMediaType,
-            encoding,
-            originalSize,
-          }),
-        });
-        const confirmData = await confirmRes.json();
-        if (!confirmData.success) throw new Error(confirmData.message || "Finalize failed");
-      } else {
-        setUploadMsg("Uploading...");
-        const formData = new FormData();
-        formData.append("file", payload, file.name);
-        formData.append("title", file.name.replace(/\.[^.]+$/, ""));
-        formData.append("mediaType", uploadMediaType);
-        formData.append("encoding", encoding);
-        formData.append("originalSize", String(originalSize));
-        const res = await fetch("/api/books", { method: "POST", body: formData });
-        const data = await res.json();
-        if (!data.success) throw new Error(data.message || "Upload failed");
-      }
-
-      setProgress(100);
-      setUploadMsg(
-        encoding === "gzip"
-          ? `Shelved! (saved ${Math.max(1, Math.round((1 - payload.size / originalSize) * 100))}% storage)`
-          : "Shelved!"
-      );
-      await Promise.all([loadBooks(), loadStats()]);
-      setTimeout(() => {
-        setUploadOpen(false);
-        setUploading(false);
-        setProgress(0);
-      }, 800);
-    } catch (err) {
-      setUploadMsg(`Upload failed: ${err instanceof Error ? err.message : "Unknown error"}`);
-      setUploading(false);
+      const confirmData = await confirmRes.json();
+      if (!confirmData.success) throw new Error(confirmData.message || "Finalize failed");
+    } else {
+      onPhase("uploading", 30);
+      const formData = new FormData();
+      formData.append("file", payload, file.name);
+      formData.append("title", file.name.replace(/\.[^.]+$/, ""));
+      formData.append("mediaType", mediaType);
+      formData.append("encoding", encoding);
+      formData.append("originalSize", String(originalSize));
+      const res = await fetch("/api/books", { method: "POST", body: formData });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || "Upload failed");
     }
+  };
+
+  const handleUpload = async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    if (list.length === 0) return;
+    setUploading(true);
+    setUploadQueue(list.map((f) => ({ name: f.name, status: "pending" as const, percent: 0 })));
+
+    let ok = 0;
+    let fail = 0;
+    for (let i = 0; i < list.length; i++) {
+      const file = list[i];
+      const update = (status: UploadQueueItem["status"], percent: number, message?: string) =>
+        setUploadQueue((q) => q.map((item, idx) => (idx === i ? { ...item, status, percent, message } : item)));
+      try {
+        await uploadOne(file, uploadMediaType, update);
+        update("done", 100);
+        ok++;
+      } catch (err) {
+        update("error", 0, err instanceof Error ? err.message : "Unknown error");
+        fail++;
+      }
+    }
+
+    await Promise.all([loadBooks(), loadStats()]);
+    if (list.length === 1) {
+      const failed = fail > 0;
+      showToast(failed ? "err" : "ok", failed ? "Upload failed" : `“${list[0].name.replace(/\.[^.]+$/, "")}” shelved`);
+      if (!failed) {
+        setTimeout(() => {
+          setUploadOpen(false);
+          setUploading(false);
+          setUploadQueue([]);
+        }, 800);
+        return;
+      }
+    } else {
+      showToast(fail === 0 ? "ok" : ok > 0 ? "ok" : "err", fail === 0 ? `${ok} books shelved` : `${ok} shelved, ${fail} failed`);
+    }
+    setUploading(false);
   };
 
   // ---------------- Shelves ----------------
@@ -1038,8 +1075,7 @@ export default function DashboardPage() {
                   onDrop={(e) => {
                     e.preventDefault();
                     e.currentTarget.classList.remove("drag-over");
-                    const file = e.dataTransfer.files[0];
-                    if (file) handleUpload(file);
+                    if (e.dataTransfer.files.length > 0) handleUpload(e.dataTransfer.files);
                   }}
                   style={{ cursor: "pointer" }}
                 >
@@ -1048,24 +1084,50 @@ export default function DashboardPage() {
                     <polyline points="17 8 12 3 7 8" />
                     <line x1="12" y1="3" x2="12" y2="15" />
                   </svg>
-                  <p>Drop an EPUB, PDF or video here</p>
-                  <span>or click to choose a file from your device</span>
+                  <p>Drop EPUB, PDF or video files here</p>
+                  <span>or click to choose — select several at once for a batch upload</span>
                   <input
                     type="file"
                     accept=".epub,.pdf,.mp4,.webm,.m4v"
+                    multiple
                     hidden
                     onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) handleUpload(file);
+                      if (e.target.files && e.target.files.length > 0) handleUpload(e.target.files);
+                      e.target.value = "";
                     }}
                   />
                 </label>
               ) : (
-                <div className="upload-progress">
-                  <div className="progress-bar">
-                    <div className="progress-fill" style={{ width: `${progress}%` }} />
-                  </div>
-                  <p style={{ fontSize: 13.5, color: "var(--text-secondary)", fontFamily: "var(--serif)" }}>{uploadMsg}</p>
+                <div className="upload-queue">
+                  {uploadQueue.map((item, i) => (
+                    <div key={i} className={`upload-row ${item.status}`}>
+                      <div className="upload-row-top">
+                        <span className="upload-row-name" title={item.name}>
+                          {item.status === "done" ? "✓ " : item.status === "error" ? "× " : ""}
+                          {item.name}
+                        </span>
+                        <span className="upload-row-status">
+                          {item.status === "pending"
+                            ? "Waiting…"
+                            : item.status === "compressing"
+                              ? "Compressing…"
+                              : item.status === "uploading"
+                                ? `${item.percent}%`
+                                : item.status === "processing"
+                                  ? "Finishing…"
+                                  : item.status === "done"
+                                    ? "Shelved"
+                                    : item.message || "Failed"}
+                        </span>
+                      </div>
+                      <div className="upload-row-bar">
+                        <div
+                          className={`upload-row-fill ${item.status === "error" ? "err" : ""}`}
+                          style={{ width: `${item.status === "error" ? 100 : item.percent}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

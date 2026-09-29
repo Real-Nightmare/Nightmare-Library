@@ -26,6 +26,7 @@ function ReaderInner() {
   const renditionRef = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const epubRef = useRef<any>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const percentRef = useRef(0);
   const savingRef = useRef(false);
   const touchStartX = useRef<number | null>(null);
@@ -126,18 +127,22 @@ function ReaderInner() {
           const ePub = (await import("epubjs")).default;
           const buffer = await fileRes.arrayBuffer();
           const epub = ePub(buffer as unknown as ArrayBuffer);
-          const rendition = epub.renderTo(viewerRef.current!, {
-            width: "100%",
-            height: "100%",
-            flow: "paginated",
-            spread: "none",
+          const host = viewerRef.current!;
+          // Explicit PIXELS: "100%" makes epub.js cache whatever the container
+          // happened to measure mid-layout (race → tiny reader that survives
+          // resizes). Measure after layout settles, then ResizeObserver keeps
+          // it correct on phone rotation AND desktop window resizes.
+          const measure = () => ({
+            width: Math.max(200, host.clientWidth || window.innerWidth),
+            height: Math.max(200, host.clientHeight || Math.round(window.innerHeight * 0.8)),
           });
+          const { width, height } = measure();
+          const rendition = epub.renderTo(host, { width, height, flow: "paginated", spread: "none" });
           renditionRef.current = rendition;
           epubRef.current = epub;
-          await rendition.display();
-          // Apply the user's theme (may have loaded from localStorage after mount).
-          applyReaderTheme(dark);
-
+          // relocated MUST be registered BEFORE display(): the first relocation
+          // fires during display() and enables the footer buttons. Registering
+          // after display() resolved is why the page buttons started disabled.
           rendition.on("relocated", (location: { start: { percentage: number; displayed: { page: number }; href: string }; end: { percentage: number; displayed: { page: number } } }) => {
             if (location?.start) {
               const pct = location.start.percentage * 100;
@@ -149,6 +154,24 @@ function ReaderInner() {
               setHasNext(pct < 99.5);
             }
           });
+          await rendition.display();
+          // Apply the user's theme (may have loaded from localStorage after mount).
+          applyReaderTheme(dark);
+
+          // Keep the rendition matched to the container: rotation, window
+          // resize, toolbar/search panel collapsing in/out.
+          const ro = new ResizeObserver(() => {
+            const r = renditionRef.current;
+            if (!r) return;
+            const next = measure();
+            try {
+              r.resize(next.width, next.height);
+            } catch {
+              // rendition destroyed mid-flight
+            }
+          });
+          ro.observe(host);
+          resizeObserverRef.current = ro;
 
           if (initialPercent > 0 && initialPercent < 100) {
             try {
@@ -180,6 +203,8 @@ function ReaderInner() {
 
     return () => {
       cancelled = true;
+      resizeObserverRef.current?.disconnect();
+      resizeObserverRef.current = null;
       renditionRef.current?.destroy();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -216,9 +241,19 @@ function ReaderInner() {
     };
   }, [id]);
 
-  // Keep rendition sized to its container.
+  // Keep rendition sized to its container (belt-and-braces for browsers
+  // without ResizeObserver; the observer is the primary mechanism now).
   useEffect(() => {
-    const onResize = () => renditionRef.current?.resize?.();
+    const onResize = () => {
+      const r = renditionRef.current;
+      const host = viewerRef.current;
+      if (!r || !host) return;
+      try {
+        r.resize(Math.max(200, host.clientWidth), Math.max(200, host.clientHeight));
+      } catch {
+        // ignore
+      }
+    };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);

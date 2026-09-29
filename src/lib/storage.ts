@@ -236,6 +236,58 @@ export async function deleteBookFile(
   }
 }
 
+// ---------------- Small-object helpers (covers) ----------------
+// Covers live in B2 (bucket) when B2 is configured, else on local disk.
+// The serverless filesystem is EPHEMERAL — local-only covers vanish between
+// instances/deployments, which is why covers 404'd in production.
+
+/** Put a small object (e.g. cover) into B2. Returns the storage key, or null when B2 is unavailable. */
+export async function putSmallObject(
+  key: string,
+  data: Buffer,
+  contentType: string
+): Promise<string | null> {
+  try {
+    const cfg = await s3Config();
+    if (!cfg) return null;
+    await clientFor(cfg).send(
+      new PutObjectCommand({ Bucket: cfg.bucket, Key: key, Body: data, ContentType: contentType })
+    );
+    return key;
+  } catch (error) {
+    console.error("putSmallObject failed:", error);
+    return null;
+  }
+}
+
+/** Read a small object from B2 (null when missing or B2 unavailable). */
+export async function getSmallObject(key: string): Promise<Buffer | null> {
+  try {
+    const cfg = await s3Config();
+    if (!cfg) return null;
+    const res = await clientFor(cfg).send(
+      new GetObjectCommand({ Bucket: cfg.bucket, Key: key })
+    );
+    return await streamToBuffer(res.Body);
+  } catch (error) {
+    if ((error as { name?: string })?.name !== "NoSuchKey") {
+      console.error("getSmallObject failed:", error);
+    }
+    return null;
+  }
+}
+
+/** Delete a small object from B2 (best-effort). */
+export async function deleteSmallObject(key: string): Promise<void> {
+  try {
+    const cfg = await s3Config();
+    if (!cfg) return;
+    await clientFor(cfg).send(new DeleteObjectCommand({ Bucket: cfg.bucket, Key: key }));
+  } catch {
+    // best-effort
+  }
+}
+
 // ---------------- Media streaming (video, HTTP Range) ----------------
 
 export interface MediaRange {

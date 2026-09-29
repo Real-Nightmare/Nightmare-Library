@@ -2,7 +2,7 @@ import { mkdir, writeFile, readFile, unlink } from "fs/promises";
 import path from "path";
 
 /**
- * Cover-art extraction for the library grid.
+ * Cover-art extraction + storage for the library grid.
  *
  * - EPUB: locates the cover via META-INF/container.xml → OPF manifest
  *   (item with properties="cover-image", else meta[name=cover] content id,
@@ -11,9 +11,9 @@ import path from "path";
  * - PDF: not extracted (would require the native canvas package) — the grid
  *   falls back to the file-type placeholder.
  *
- * Covers are written to .data/covers/ at upload time (the file bytes are
- * available then) and served from there, keeping the grid fast with no
- * per-cover object-storage round-trip.
+ * STORAGE: B2 first (key `covers/<bookId>.img`), local disk fallback when
+ * B2 is not configured. The serverless filesystem is ephemeral, so B2 is
+ * required for covers to survive across instances in production.
  */
 
 const COVERS_DIR = path.join(process.cwd(), ".data", "covers");
@@ -25,6 +25,10 @@ export interface ExtractedCover {
 
 export async function saveCover(bookId: string, cover: ExtractedCover): Promise<void> {
   try {
+    const { putSmallObject } = await import("./storage");
+    const key = await putSmallObject(`covers/${bookId}.img`, cover.data, cover.contentType);
+    if (key) return; // stored in B2
+    // Fallback: local disk (dev / local-storage deployments)
     await mkdir(COVERS_DIR, { recursive: true });
     await writeFile(path.join(COVERS_DIR, `${bookId}.img`), cover.data);
   } catch (error) {
@@ -34,6 +38,13 @@ export async function saveCover(bookId: string, cover: ExtractedCover): Promise<
 
 export async function readCover(bookId: string): Promise<Buffer | null> {
   try {
+    const { getSmallObject } = await import("./storage");
+    const remote = await getSmallObject(`covers/${bookId}.img`);
+    if (remote) return remote;
+  } catch {
+    // fall through to disk
+  }
+  try {
     return await readFile(path.join(COVERS_DIR, `${bookId}.img`));
   } catch {
     return null;
@@ -41,6 +52,12 @@ export async function readCover(bookId: string): Promise<Buffer | null> {
 }
 
 export async function deleteCover(bookId: string): Promise<void> {
+  try {
+    const { deleteSmallObject } = await import("./storage");
+    await deleteSmallObject(`covers/${bookId}.img`);
+  } catch {
+    // best-effort
+  }
   try {
     await unlink(path.join(COVERS_DIR, `${bookId}.img`));
   } catch {

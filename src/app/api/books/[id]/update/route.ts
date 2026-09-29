@@ -20,10 +20,14 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     }
 
     const fields: { title?: string; author?: string; tags?: string; is_favorite?: boolean; media_type?: string } = {};
-    if (body.title !== undefined) fields.title = body.title;
-    if (body.author !== undefined) fields.author = body.author;
-    if (body.tags !== undefined) fields.tags = body.tags;
-    if (body.is_favorite !== undefined) fields.is_favorite = body.is_favorite;
+    if (body.title !== undefined) {
+      const t = String(body.title).trim().slice(0, 300);
+      if (!t) return NextResponse.json({ success: false, message: "Title cannot be empty" }, { status: 400 });
+      fields.title = t;
+    }
+    if (body.author !== undefined) fields.author = String(body.author).trim().slice(0, 200) || undefined;
+    if (body.tags !== undefined) fields.tags = String(body.tags).trim().slice(0, 500) || undefined;
+    if (body.is_favorite !== undefined) fields.is_favorite = Boolean(body.is_favorite);
     if (body.media_type !== undefined) {
       if (!VALID_MEDIA_TYPES.includes(body.media_type)) {
         return NextResponse.json({ success: false, message: "Invalid media_type" }, { status: 400 });

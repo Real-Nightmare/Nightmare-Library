@@ -93,6 +93,10 @@ export async function POST(req: NextRequest) {
       let body: {
         fileType?: string;
         uploadId?: string;
+        /** Stateless-confirm fields: the client echoes back what presign returned, */
+        /** so the server does not depend on in-memory state surviving between requests. */
+        bookId?: string;
+        storageId?: string;
         title?: string;
         author?: string | null;
         tags?: string | null;
@@ -109,21 +113,37 @@ export async function POST(req: NextRequest) {
       }
 
       // ----- Step 2: confirm a completed presigned upload -----
-      if (body.uploadId) {
-        const pending = pendingUploads.get(body.uploadId);
+      if (body.uploadId || (body.bookId && body.storageId)) {
+        // Stateless first: trust the client-echoed presign facts, then VERIFY
+        // against storage (storedSize === null when the object isn't there).
+        // The legacy in-memory registry is only a fallback for stale clients.
+        const pending =
+          body.bookId && body.storageId
+            ? {
+                bookId: body.bookId,
+                storageId: body.storageId,
+                fileType:
+                  body.fileType === "epub" || body.fileType === "pdf" || body.fileType === "mp4" || body.fileType === "webm" || body.fileType === "m4v"
+                    ? body.fileType
+                    : "epub",
+                createdAt: Date.now(),
+              }
+            : pendingUploads.get(body.uploadId ?? "");
         if (!pending) {
           return NextResponse.json(
             { success: false, message: "Unknown or expired uploadId" },
             { status: 400 }
           );
         }
+        if (body.uploadId) pendingUploads.delete(body.uploadId);
         const title = body.title?.trim();
         if (!title) {
           return NextResponse.json({ success: false, message: "Title is required" }, { status: 400 });
         }
 
         // verifyUpload returns the STORED size (compressed bytes when the
-        // browser uploaded gzip data directly to B2).
+        // browser uploaded gzip data directly to B2). This doubles as proof
+        // that the echoed bookId/storageId pair is genuine.
         const storedSize = await verifyUpload(pending.storageId);
         if (storedSize === null) {
           return NextResponse.json(
@@ -131,8 +151,6 @@ export async function POST(req: NextRequest) {
             { status: 400 }
           );
         }
-
-        pendingUploads.delete(body.uploadId);
 
         const encoding = body.encoding === "gzip" ? "gzip" : "raw";
         const originalSize = Number(body.originalSize) || (encoding === "gzip" ? 0 : storedSize);
@@ -221,6 +239,7 @@ export async function POST(req: NextRequest) {
         uploadId,
         uploadUrl: presigned.uploadUrl,
         bookId,
+        storageId: presigned.storageId,
       });
     }
 
