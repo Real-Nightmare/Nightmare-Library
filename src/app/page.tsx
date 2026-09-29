@@ -6,25 +6,15 @@ import { useRouter } from "next/navigation";
 export default function LoginPage() {
   const router = useRouter();
   const [password, setPassword] = useState("");
+  const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
   const [attemptsLeft, setAttemptsLeft] = useState<number | null>(null);
   const [locked, setLocked] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [dark, setDark] = useState(true);
 
   useEffect(() => {
-    const saved = localStorage.getItem("theme");
-    const isDark = saved ? saved === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
-    setDark(isDark);
-    document.body.classList.toggle("dark-theme", isDark);
+    document.getElementById("password")?.focus();
   }, []);
-
-  const toggleTheme = () => {
-    const next = !dark;
-    setDark(next);
-    document.body.classList.toggle("dark-theme", next);
-    localStorage.setItem("theme", next ? "dark" : "light");
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -41,6 +31,7 @@ export default function LoginPage() {
       const data = await res.json();
 
       if (data.success) {
+        // The session cookie lasts 400 days — one sign-in is all it takes.
         router.push("/dashboard");
         router.refresh();
       } else {
@@ -52,53 +43,86 @@ export default function LoginPage() {
         }
       }
     } catch {
-      setError("Login failed. Please try again.");
+      setError("The door is stuck. Please try again.");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <>
-      <button className="theme-switch" onClick={toggleTheme} aria-label="Toggle theme">
-        <img src={dark ? "/assets/sun.svg" : "/assets/moon.svg"} alt="" width={24} height={24} />
-      </button>
-
-      <div className="login-container">
-        <div className="login-card">
-          <div className="logo">
-            <h1>Nightmare Library</h1>
-            <p>Your private digital bookshelf</p>
+    <div className="login-container">
+      <div className="login-card">
+        <div className="logo">
+          <div className="logo-mark">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+              <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+            </svg>
           </div>
+          <h1>Nightmare Library</h1>
+          <p>a private shelf for strange stories</p>
+        </div>
 
-          {error && (
-            <div className="error-message">
-              {error}
-              {attemptsLeft !== null && attemptsLeft > 0 && ` (${attemptsLeft} attempts remaining)`}
-            </div>
-          )}
+        {error && (
+          <div className="error-message">
+            {error}
+            {attemptsLeft !== null && attemptsLeft > 0 && ` (${attemptsLeft} attempts remaining)`}
+          </div>
+        )}
 
-          <form onSubmit={handleSubmit}>
-            <div className="form-group">
-              <label htmlFor="password">Password</label>
+        <form onSubmit={handleSubmit}>
+          <div className="form-group">
+            <label htmlFor="password">The word that opens the door</label>
+            <div className="input-wrap">
               <input
-                type="password"
+                type={showPw ? "text" : "password"}
                 id="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your password"
+                placeholder="whisper it here"
                 required
                 autoComplete="current-password"
                 disabled={locked}
+                style={{ paddingRight: 44 }}
               />
+              <button
+                type="button"
+                className="btn-icon input-trailing"
+                onClick={() => setShowPw((v) => !v)}
+                aria-label={showPw ? "Hide password" : "Show password"}
+                tabIndex={-1}
+              >
+                {showPw ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                    <line x1="1" y1="1" x2="23" y2="23" />
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                )}
+              </button>
             </div>
+          </div>
 
-            <button type="submit" className="submit-btn" disabled={loading || locked}>
-              {loading ? "Entering..." : "Enter Library"}
-            </button>
-          </form>
-        </div>
+          <button type="submit" className="submit-btn" disabled={loading || locked}>
+            {loading ? (
+              <>
+                <span className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
+                Turning the key…
+              </>
+            ) : (
+              "Enter the Library"
+            )}
+          </button>
+        </form>
+
+        <p style={{ marginTop: 18, textAlign: "center", fontSize: 12.5, color: "var(--text-muted)", fontFamily: "var(--serif)", fontStyle: "italic" }}>
+          One sign-in keeps the door open. No keys required after that.
+        </p>
       </div>
-    </>
+    </div>
   );
 }

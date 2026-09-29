@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "crypto";
-import { listBooks, insertBook } from "@/lib/repo";
+import { listBooks, insertBook, insertContentChapter } from "@/lib/repo";
 import {
   createPresignedUpload,
   verifyUpload,
@@ -9,12 +9,14 @@ import {
   tryDecompress,
 } from "@/lib/storage";
 import { extractCover, saveCover } from "@/lib/cover";
+import { indexEpubContent } from "@/lib/indexer";
 
 export const runtime = "nodejs";
 
 const EPUB_MIME = "application/epub+zip";
 const PDF_MIME = "application/pdf";
 const MP4_MIME = "video/mp4";
+const VIDEO_MIME: Record<string, string> = { mp4: "video/mp4", webm: "video/webm", m4v: "video/mp4" };
 
 const VALID_MEDIA_TYPES = ["book", "ln", "manga", "anime_official"] as const;
 const MEDIA_BY_EXT: Record<string, string> = {
@@ -63,14 +65,22 @@ interface PendingUpload {
 
 // Short-lived in-memory registry of presigned uploads (per serverless instance).
 // The confirm call verifies the object actually exists in B2, so a lost
-// registry entry simply fails the confirm — safe.
+// registry entry simply fails the confirm — safe. prunePending() caps the
+// map so abandoned uploads can't grow it forever.
 const pendingUploads = new Map<string, PendingUpload>();
 const PENDING_TTL_MS = 15 * 60 * 1000;
+const PENDING_MAX = 200;
 
 function prunePending() {
   const cutoff = Date.now() - PENDING_TTL_MS;
   for (const [id, p] of pendingUploads) {
     if (p.createdAt < cutoff) pendingUploads.delete(id);
+  }
+  // Hard cap (oldest first) — defense against unbounded growth.
+  while (pendingUploads.size > PENDING_MAX) {
+    const oldest = pendingUploads.keys().next().value;
+    if (!oldest) break;
+    pendingUploads.delete(oldest);
   }
 }
 
@@ -130,11 +140,12 @@ export async function POST(req: NextRequest) {
         // Cover extraction (EPUB only, best-effort): pull the original bytes
         // back from storage and grab the manifest-declared cover image.
         let coverUrl: string | null = null;
+        let epubOriginal: Buffer | null = null;
         if (pending.fileType === "epub") {
           const { readBookFileDecoded } = await import("@/lib/storage");
-          const original = await readBookFileDecoded("b2", pending.storageId, encoding);
-          if (original) {
-            const cover = await extractCover("epub", original);
+          epubOriginal = await readBookFileDecoded("b2", pending.storageId, encoding);
+          if (epubOriginal) {
+            const cover = await extractCover("epub", epubOriginal);
             if (cover) {
               await saveCover(pending.bookId, cover);
               coverUrl = `/api/books/${pending.bookId}/cover`;
@@ -159,6 +170,13 @@ export async function POST(req: NextRequest) {
           uploaded_at: Date.now(),
         });
 
+        // Content indexing AFTER the book row exists (FK requires it).
+        if (epubOriginal) {
+          await indexEpubContent(epubOriginal, (row) =>
+            insertContentChapter(pending.bookId, row.chapter, row.content_text, row.snippet, row.position)
+          );
+        }
+
         return NextResponse.json({
           success: true,
           book: { id: pending.bookId, title, author: body.author ?? null, tags: body.tags ?? null, file_type: pending.fileType, progress: 0 },
@@ -167,10 +185,12 @@ export async function POST(req: NextRequest) {
 
       // ----- Step 1: presign -----
       const fileType =
-        body.fileType === "epub" || body.fileType === "pdf" || body.fileType === "mp4" ? body.fileType : null;
+        body.fileType === "epub" || body.fileType === "pdf" || body.fileType === "mp4" || body.fileType === "webm" || body.fileType === "m4v"
+          ? body.fileType
+          : null;
       if (!fileType) {
         return NextResponse.json(
-          { success: false, message: "fileType must be 'epub', 'pdf', or 'mp4'" },
+          { success: false, message: "fileType must be 'epub', 'pdf', 'mp4', 'webm', or 'm4v'" },
           { status: 400 }
         );
       }
@@ -179,7 +199,7 @@ export async function POST(req: NextRequest) {
       const presigned = await createPresignedUpload(
         bookId,
         fileType,
-        fileType === "epub" ? EPUB_MIME : fileType === "mp4" ? MP4_MIME : PDF_MIME
+        fileType === "epub" ? EPUB_MIME : fileType === "pdf" ? PDF_MIME : VIDEO_MIME[fileType] || MP4_MIME
       );
 
       if (!presigned) {
@@ -220,7 +240,7 @@ export async function POST(req: NextRequest) {
     }
 
     const name = file.name.toLowerCase();
-    const ext = name.endsWith(".epub") ? "epub" : name.endsWith(".pdf") ? "pdf" : name.endsWith(".mp4") ? "mp4" : name.endsWith(".webm") ? "webm" : null;
+    const ext = name.endsWith(".epub") ? "epub" : name.endsWith(".pdf") ? "pdf" : name.endsWith(".mp4") ? "mp4" : name.endsWith(".webm") ? "webm" : name.endsWith(".m4v") ? "m4v" : null;
     if (!ext) {
       return NextResponse.json(
         { success: false, message: "Only EPUB, PDF, and MP4 files are supported" },
@@ -256,10 +276,12 @@ export async function POST(req: NextRequest) {
     const stored = await saveBookFile(bookId, fileType, payload);
 
     // Cover extraction (EPUB only, best-effort) from the ORIGINAL bytes.
+    // Cover must resolve BEFORE insertBook (the row carries cover_url).
     let coverUrl: string | null = null;
+    let epubOriginal: Buffer | null = null;
     if (fileType === "epub") {
-      const original = encoding === "gzip" ? tryDecompress(payload, "gzip") : rawBuffer;
-      const cover = await extractCover("epub", original);
+      epubOriginal = encoding === "gzip" ? tryDecompress(payload, "gzip") : rawBuffer;
+      const cover = await extractCover("epub", epubOriginal);
       if (cover) {
         await saveCover(bookId, cover);
         coverUrl = `/api/books/${bookId}/cover`;
@@ -282,6 +304,13 @@ export async function POST(req: NextRequest) {
       cover_url: coverUrl,
       uploaded_at: Date.now(),
     });
+
+    // Content indexing AFTER the book row exists (FK requires it).
+    if (epubOriginal) {
+      await indexEpubContent(epubOriginal, (row) =>
+        insertContentChapter(bookId, row.chapter, row.content_text, row.snippet, row.position)
+      );
+    }
 
     return NextResponse.json({
       success: true,

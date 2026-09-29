@@ -11,7 +11,7 @@ export async function GET(req: NextRequest, { params }: Params) {
     const { id } = await params;
     const q = req.nextUrl.searchParams.get("q")?.trim();
 
-    if (!q || q.length < 2) {
+    if (!q || q.length < 2 || q.length > 100) {
       return NextResponse.json({ success: true, results: [] });
     }
 

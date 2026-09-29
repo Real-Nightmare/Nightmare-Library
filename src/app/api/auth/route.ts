@@ -45,8 +45,15 @@ export async function POST(req: NextRequest) {
 
   await clearAttempts(ip);
   // Signing secret honors a runtime password override (from Settings).
+  // No secret configured → refuse to mint a token (fail closed).
   const { effectiveSessionSecret } = await import("@/lib/appsettings");
   const secret = await effectiveSessionSecret();
+  if (!secret) {
+    return NextResponse.json(
+      { success: false, message: "Server misconfigured: no signing secret (set PASSWORD)" },
+      { status: 500 }
+    );
+  }
   const token = await createSessionToken(secret);
   const res = NextResponse.json({ success: true, redirect: "/dashboard" });
   res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions);

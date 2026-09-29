@@ -72,10 +72,27 @@ export async function isLibsqlActive(): Promise<boolean> {
   return (await resolveDatabaseProvider()) !== "supabase";
 }
 
-/** Runs once per cold start; creates all tables if missing. */
+/** Runs once per cold start; creates all tables if missing. Single-flight: */
+/** concurrent first requests share one migration (a racing ALTER TABLE   */
+/** would otherwise throw "duplicate column" and 500 one request).        */
 let migrated = false;
+let migrationPromise: Promise<void> | null = null;
 export async function ensureMigrated(): Promise<void> {
   if (migrated) return;
+  if (!migrationPromise) {
+    migrationPromise = runMigration()
+      .then(() => {
+        migrated = true;
+      })
+      .catch((error) => {
+        migrationPromise = null; // allow retry on next request
+        throw error;
+      });
+  }
+  return migrationPromise;
+}
+
+async function runMigration(): Promise<void> {
   const db = await getDbAsync();
 
   await db.executeMultiple(`
@@ -194,6 +211,8 @@ export async function ensureMigrated(): Promise<void> {
 
   // ---- Column backfill for databases created before these columns existed.
   // Must run BEFORE any index that references the new columns. ----
+  // ---- Column backfill for databases created before these columns existed.
+  // Must run BEFORE any index that references the new columns. ----
   const cols = await db.execute("PRAGMA table_info(books)");
   const names = cols.rows.map((r) => (r as unknown as { name: string }).name);
   if (!names.includes("media_type")) {
@@ -206,6 +225,4 @@ export async function ensureMigrated(): Promise<void> {
     await db.execute("ALTER TABLE books ADD COLUMN original_size INTEGER");
   }
   await db.execute("CREATE INDEX IF NOT EXISTS idx_books_media_type ON books(media_type)");
-
-  migrated = true;
 }

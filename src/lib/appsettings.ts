@@ -146,13 +146,24 @@ export async function setSettings(patch: Record<string, string>): Promise<void> 
 // ---------------- Resolution (cached) ----------------
 
 let cache: { map: Record<string, string>; at: number } | null = null;
+let cacheInflight: Promise<Record<string, string>> | null = null;
 const CACHE_MS = 15_000;
 
 async function cachedMap(): Promise<Record<string, string>> {
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.map;
-  const map = await getSettingsMap();
-  cache = { map, at: Date.now() };
-  return map;
+  // Single-flight: concurrent cold requests share one DB read instead of
+  // stampeding it (then the fastest writer wins the cache slot).
+  if (!cacheInflight) {
+    cacheInflight = getSettingsMap()
+      .then((map) => {
+        cache = { map, at: Date.now() };
+        return map;
+      })
+      .finally(() => {
+        cacheInflight = null;
+      });
+  }
+  return cacheInflight;
 }
 
 export function invalidateSettingsCache(): void {
@@ -226,11 +237,17 @@ export async function effectiveSitePassword(): Promise<string | null> {
  * Effective session-signing secret. A custom password derives a stable
  * signing secret, so changing the password invalidates all sessions
  * (everyone must log back in — the safe behavior).
+ *
+ * Returns NULL when no secret is configured (no password override, no
+ * JWT_SECRET, no PASSWORD). Verification must then FAIL CLOSED — a literal
+ * fallback constant would let anyone forge valid session tokens on a
+ * misconfigured deployment.
  */
-export async function effectiveSessionSecret(): Promise<string> {
+export async function effectiveSessionSecret(): Promise<string | null> {
   const custom = await resolveSetting("site_password");
   if (custom) return `nmlr::${custom}`;
-  return process.env.JWT_SECRET || process.env.PASSWORD || "nightmare-library";
+  const envSecret = process.env.JWT_SECRET?.trim() || process.env.PASSWORD?.trim();
+  return envSecret || null;
 }
 
 // ---------------- Masking / API views ----------------

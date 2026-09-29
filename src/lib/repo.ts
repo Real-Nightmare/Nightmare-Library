@@ -372,6 +372,18 @@ export async function createShelf(
   return { id, name, color, position };
 }
 
+/** Delete a shelf (shelf_items rows cascade). */
+export async function deleteShelf(shelfId: string): Promise<void> {
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
+    const { error } = await sb.from("shelves").delete().eq("id", shelfId);
+    if (error) throw new Error(error.message);
+    return;
+  }
+  await ensureMigrated();
+  await (await sql()).execute({ sql: "DELETE FROM shelves WHERE id = ?", args: [shelfId] });
+}
+
 export async function nextShelfPosition(): Promise<number> {
   if (await isSupabaseConfigured()) {
     const sb = await getSupabase();
@@ -662,17 +674,48 @@ export async function clearLoginAttempts(ip: string): Promise<void> {
 
 // ======================= Content search =======================
 
+/** Insert one indexed chapter row (upload-time EPUB indexing). */
+export async function insertContentChapter(
+  bookId: string,
+  chapter: string,
+  contentText: string,
+  snippet: string,
+  position: number
+): Promise<void> {
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
+    const { error } = await sb.from("book_content_index").insert({
+      book_id: bookId,
+      chapter,
+      content_text: contentText,
+      snippet,
+      position,
+      created_at: Date.now(),
+    });
+    if (error) throw new Error(error.message);
+    return;
+  }
+  await ensureMigrated();
+  await (await sql()).execute({
+    sql: "INSERT INTO book_content_index (book_id, chapter, content_text, snippet, position, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    args: [bookId, chapter, contentText, snippet, position, Date.now()],
+  });
+}
+
 export async function searchBookContent(
   bookId: string,
   q: string
 ): Promise<{ chapter: string | null; snippet: string | null; position: number | null }[]> {
   if (await isSupabaseConfigured()) {
     const sb = await getSupabase();
+    // Strip PostgREST filter operators so the pattern can't alter .or() syntax.
+    const safe = q.replace(/[,()\"*]/g, " ").trim();
+    if (!safe) return [];
     const { data, error } = await sb
       .from("book_content_index")
       .select("chapter, snippet, position")
       .eq("book_id", bookId)
-      .or(`content_text.ilike.%${q}%,snippet.ilike.%${q}%`)
+      .or(`content_text.ilike.%${safe}%,snippet.ilike.%${safe}%`)
       .order("position")
       .limit(50);
     if (error) throw new Error(error.message);

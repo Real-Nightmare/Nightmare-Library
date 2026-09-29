@@ -39,7 +39,7 @@ export default function WatchPage() {
       <div className="watch-body">
         <div className="reader-loading">
           <div className="spinner" />
-          <p>Loading...</p>
+          <p>Loading…</p>
         </div>
       </div>
     );
@@ -62,7 +62,7 @@ export default function WatchPage() {
     <div className="watch-body">
       <nav className="reader-toolbar">
         <div className="toolbar-left">
-          <button className="btn-icon" onClick={() => router.push("/dashboard")} title="Back">
+          <button className="btn-icon" onClick={() => router.push("/dashboard")} title="Back" aria-label="Back">
             ←
           </button>
           <span className="book-title-bar">{book.title}</span>

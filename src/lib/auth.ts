@@ -8,13 +8,15 @@ import {
  * Single-password authentication for the private library.
  *
  * - Password from `PASSWORD` env (set in Freebuff Settings → Environment)
- * - Sessions: signed HMAC token in an HttpOnly cookie, stateless, 7-day TTL
+ * - Sessions: signed HMAC token in an HttpOnly cookie, stateless.
+ *   400-day TTL (the browser cookie cap): one sign-in keeps you in until
+ *   you explicitly log out or clear cookies — no forced re-logins.
  * - Rate limiting: 10 failed attempts per IP per 15-minute window
  *   (Supabase Postgres in production, libSQL file in dev)
  */
 
 export const SESSION_COOKIE = "NMLR_SESSION";
-const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const SESSION_TTL_MS = 400 * 24 * 60 * 60 * 1000; // 400 days — browser max-age cap
 const MAX_ATTEMPTS = 10;
 const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 

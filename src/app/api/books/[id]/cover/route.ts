@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readCover } from "@/lib/cover";
+import { readCover, detectImageType } from "@/lib/cover";
 
 export const runtime = "nodejs";
 
@@ -8,6 +8,7 @@ type Params = { params: Promise<{ id: string }> };
 /**
  * GET /api/books/[id]/cover — extracted cover image (EPUB uploads only).
  * 404 when no cover exists; the UI falls back to the file-type placeholder.
+ * Content type is sniffed from magic bytes (EPUB manifests often lie).
  */
 export async function GET(_req: NextRequest, { params }: Params) {
   try {
@@ -18,7 +19,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
     }
     return new NextResponse(new Uint8Array(data), {
       headers: {
-        "Content-Type": "image/jpeg",
+        "Content-Type": detectImageType(data),
         "Cache-Control": "private, max-age=86400",
       },
     });
