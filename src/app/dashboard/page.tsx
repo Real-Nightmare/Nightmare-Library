@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import GeneratedCover from "@/components/GeneratedCover";
+import BookCover from "@/components/BookCover";
 
 interface Book {
   id: string;
@@ -689,24 +689,52 @@ export default function DashboardPage() {
       >
         ♥
       </button>
+      <button className="btn-icon" onClick={(e) => refreshBook(book, e)} title="Re-read cover & details from the file" aria-label="Refresh details">
+        ↻
+      </button>
       <button className="btn-icon btn-danger" onClick={(e) => deleteBook(book, e)} title="Delete" aria-label="Delete">
         ×
       </button>
     </div>
   );
 
+  // Re-read the stored file to repair the row: pull the EPUB's own cover and
+  // title/author. Books uploaded before that parsing existed are repaired by
+  // this (and automatically when their cover 404s on the grid).
+  const refreshBook = async (book: Book, e: React.MouseEvent) => {
+    e.stopPropagation();
+    showToast("ok", `Re-reading “${book.title}”…`);
+    try {
+      const res = await fetch(`/api/books/${book.id}/refresh`, { method: "POST" });
+      const data = await res.json();
+      if (!data.success) {
+        showToast("err", data.message || "Could not refresh");
+        return;
+      }
+      await loadBooks();
+      const changed = (data.changed || []) as string[];
+      showToast(
+        "ok",
+        changed.length
+          ? `“${data.title}” — fixed ${changed.join(", ")}`
+          : data.minutes
+            ? `“${data.title}” — nothing to fix, ~${data.minutes} min read`
+            : `“${data.title}” — nothing to fix`
+      );
+    } catch {
+      showToast("err", "Refresh failed");
+    }
+  };
+
   const coverBlock = (book: Book) => (
     <div className="book-cover">
-      {book.cover_url ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={book.cover_url} alt="" loading="lazy" />
-      ) : (
-        <GeneratedCover
-          title={book.title}
-          author={book.author}
-          kicker={isVideo(book) ? "Film" : MEDIA_LABELS[book.media_type] || book.file_type.toUpperCase()}
-        />
-      )}
+      <BookCover
+        bookId={book.id}
+        coverUrl={book.cover_url}
+        title={book.title}
+        author={book.author}
+        kicker={isVideo(book) ? "Film" : MEDIA_LABELS[book.media_type] || book.file_type.toUpperCase()}
+      />
       <span className={`book-type-badge media-${book.media_type}`}>
         {MEDIA_LABELS[book.media_type] || book.file_type}
       </span>
@@ -1142,12 +1170,13 @@ export default function DashboardPage() {
                   onKeyDown={(e) => e.key === "Enter" && router.push(openTarget(book))}
                 >
                   <div className="row-cover">
-                    {book.cover_url ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={book.cover_url} alt="" loading="lazy" />
-                    ) : (
-                      <GeneratedCover title={book.title} author={book.author} />
-                    )}
+                    <BookCover
+                      bookId={book.id}
+                      coverUrl={book.cover_url}
+                      title={book.title}
+                      author={book.author}
+                      kicker={isVideo(book) ? "Film" : MEDIA_LABELS[book.media_type] || book.file_type.toUpperCase()}
+                    />
                   </div>
                   <div className="row-main">
                     <div className="row-title">{book.title}</div>
@@ -1349,7 +1378,6 @@ export default function DashboardPage() {
                     )}
                     <button
                       className={`palette-item ${i === paletteIdx ? "on" : ""}`}
-                      onMouseEnter={() => setPaletteIdx(i)}
                       onClick={() => item.run()}
                     >
                       <span className="palette-icon">{item.icon}</span>

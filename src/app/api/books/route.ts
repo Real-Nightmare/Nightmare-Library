@@ -9,6 +9,7 @@ import {
   tryDecompress,
 } from "@/lib/storage";
 import { extractCover, saveCover } from "@/lib/cover";
+import { extractEpubMeta, looksLikeFilenameTitle } from "@/lib/epubmeta";
 import { indexEpubContent } from "@/lib/indexer";
 
 export const runtime = "nodejs";
@@ -171,10 +172,24 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        // The browser only knows the filename, so uploads used to land as
+        // "vol3" / "Unknown hand". The EPUB itself carries the real title and
+        // author in its OPF package document — trust the file over the
+        // filename, but never overwrite a title someone deliberately set.
+        let finalTitle = title;
+        let finalAuthor = body.author?.trim() || null;
+        if (epubOriginal) {
+          const meta = await extractEpubMeta(epubOriginal);
+          if (meta) {
+            if (meta.title && looksLikeFilenameTitle(title)) finalTitle = meta.title;
+            if (meta.author && !finalAuthor) finalAuthor = meta.author;
+          }
+        }
+
         await insertBook({
           id: pending.bookId,
-          title,
-          author: body.author?.trim() || null,
+          title: finalTitle,
+          author: finalAuthor,
           tags: body.tags?.trim() || null,
           storage_provider: "b2",
           storage_id: pending.storageId,
@@ -197,7 +212,7 @@ export async function POST(req: NextRequest) {
 
         return NextResponse.json({
           success: true,
-          book: { id: pending.bookId, title, author: body.author ?? null, tags: body.tags ?? null, file_type: pending.fileType, progress: 0 },
+          book: { id: pending.bookId, title: finalTitle, author: finalAuthor, tags: body.tags ?? null, file_type: pending.fileType, progress: 0 },
         });
       }
 
