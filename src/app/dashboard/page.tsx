@@ -912,10 +912,10 @@ export default function DashboardPage() {
             <ul className="sidebar-menu">
               <li
                 className={`sidebar-item ${filter === "all" ? "active" : ""}`}
-                onClick={() => setFilter("all")}
+                onClick={() => { setDrawerOpen(false); setFilter("all"); }}
                 role="button"
                 tabIndex={0}
-                onKeyDown={(e) => e.key === "Enter" && setFilter("all")}
+                onKeyDown={(e) => { if (e.key === "Enter") { setDrawerOpen(false); setFilter("all"); } }}
               >
                 All Media
                 <span className="sidebar-count">{countFor("all")}</span>
@@ -930,10 +930,10 @@ export default function DashboardPage() {
                 <li
                   key={s.key}
                   className={`sidebar-item ${filter === s.key ? "active" : ""}`}
-                  onClick={() => setFilter(s.key)}
+                  onClick={() => { setDrawerOpen(false); setFilter(s.key); }}
                   role="button"
                   tabIndex={0}
-                  onKeyDown={(e) => e.key === "Enter" && setFilter(s.key)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { setDrawerOpen(false); setFilter(s.key); } }}
                 >
                   <span>{s.icon}</span>
                   {s.label}
@@ -946,19 +946,19 @@ export default function DashboardPage() {
           <div>
             <h3 className="sidebar-label">Filters</h3>
             <ul className="sidebar-menu">
-              <li className={`sidebar-item ${filter === "recent" ? "active" : ""}`} onClick={() => setFilter("recent")} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && setFilter("recent")}>
+              <li className={`sidebar-item ${filter === "recent" ? "active" : ""}`} onClick={() => { setDrawerOpen(false); setFilter("recent"); }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") { setDrawerOpen(false); setFilter("recent"); } }}>
                 Currently Reading
                 <span className="sidebar-count">{countFor("recent")}</span>
               </li>
-              <li className={`sidebar-item ${filter === "favorites" ? "active" : ""}`} onClick={() => setFilter("favorites")} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && setFilter("favorites")}>
+              <li className={`sidebar-item ${filter === "favorites" ? "active" : ""}`} onClick={() => { setDrawerOpen(false); setFilter("favorites"); }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") { setDrawerOpen(false); setFilter("favorites"); } }}>
                 Favorites
                 <span className="sidebar-count">{countFor("favorites")}</span>
               </li>
-              <li className={`sidebar-item ${filter === "epub" ? "active" : ""}`} onClick={() => setFilter("epub")} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && setFilter("epub")}>
+              <li className={`sidebar-item ${filter === "epub" ? "active" : ""}`} onClick={() => { setDrawerOpen(false); setFilter("epub"); }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") { setDrawerOpen(false); setFilter("epub"); } }}>
                 EPUBs
                 <span className="sidebar-count">{countFor("epub")}</span>
               </li>
-              <li className={`sidebar-item ${filter === "pdf" ? "active" : ""}`} onClick={() => setFilter("pdf")} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && setFilter("pdf")}>
+              <li className={`sidebar-item ${filter === "pdf" ? "active" : ""}`} onClick={() => { setDrawerOpen(false); setFilter("pdf"); }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") { setDrawerOpen(false); setFilter("pdf"); } }}>
                 PDFs
                 <span className="sidebar-count">{countFor("pdf")}</span>
               </li>
@@ -1007,10 +1007,10 @@ export default function DashboardPage() {
                   <li
                     key={s.id}
                     className={`sidebar-item sidebar-shelf-row ${filter === `shelf:${s.id}` ? "active" : ""}`}
-                    onClick={() => setFilter(`shelf:${s.id}`)}
+                    onClick={() => { setDrawerOpen(false); setFilter(`shelf:${s.id}`); }}
                     role="button"
                     tabIndex={0}
-                    onKeyDown={(e) => e.key === "Enter" && setFilter(`shelf:${s.id}`)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { setDrawerOpen(false); setFilter(`shelf:${s.id}`); } }}
                   >
                     <span style={{ width: 10, height: 10, borderRadius: 3, background: s.color, flexShrink: 0 }} />
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span>

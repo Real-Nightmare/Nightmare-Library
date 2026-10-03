@@ -308,10 +308,10 @@ function ReaderInner() {
           // The width is CAPPED. epub.js lays the book out in CSS columns as
           // wide as the container, so a 1440px window produced a 140-character
           // line — technically "filling the screen" and unreadable in practice.
-          // A page of prose wants roughly 60-80 characters; 760px of a ~17px
-          // serif lands there. On a phone the cap never binds and the reader
-          // stays full-bleed.
-          const MAX_MEASURE = 760;
+          // A page of prose wants roughly 60-85 characters; 680px of a 16px
+          // serif lands there once the theme padding is taken off. On a phone
+          // the cap never binds and the reader stays full-bleed.
+          const MAX_MEASURE = 680;
           const MIN_MEASURE = 280;
           const measure = () => {
             const hostW = host.clientWidth || window.innerWidth;
