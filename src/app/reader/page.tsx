@@ -21,7 +21,7 @@ function ReaderInner() {
   const [hasNext, setHasNext] = useState(false);
   const [navTick, setNavTick] = useState(0);
   const [tocOpen, setTocOpen] = useState(false);
-  const [toc, setToc] = useState<{ label: string; href: string; depth: number }[]>([]);
+  const [toc, setToc] = useState<{ label: string; href: string; depth: number; index: number | null }[]>([]);
   const [currentHref, setCurrentHref] = useState<string | null>(null);
   const [typeOpen, setTypeOpen] = useState(false);
   const [fontFamily, setFontFamily] = useState<"serif" | "sans" | "mono">("serif");
@@ -232,12 +232,32 @@ function ReaderInner() {
           // never delays the opening page.
           try {
             const nav = await epub.loaded.navigation;
-            const items: { label: string; href: string; depth: number }[] = [];
+            const items: { label: string; href: string; depth: number; index: number | null }[] = [];
+            // Nav hrefs are not always byte-identical to the spine's (percent
+            // encoding and nav-relative paths both differ between producers),
+            // and rendition.display(href) throws "No Section Found" when the
+            // lookup misses. Resolve each entry to a SPINE INDEX once, here,
+            // where a miss is harmless.
+            const resolveIndex = (href: string): number | null => {
+              const tries = [href, href.split("#")[0], decodeURIComponent(href.split("#")[0])];
+              for (const t of tries) {
+                const item = epub.spine?.get?.(t);
+                if (item && typeof item.index === "number") return item.index;
+              }
+              return null;
+            };
             const walk = (nodes: unknown, depth: number) => {
               if (!Array.isArray(nodes) || items.length >= 400) return;
               for (const raw of nodes as { label?: string; href?: string; subitems?: unknown }[]) {
                 if (items.length >= 400) break;
-                if (raw?.href) items.push({ label: (raw.label || "Untitled").trim() || "Untitled", href: raw.href, depth });
+                if (raw?.href) {
+                  items.push({
+                    label: (raw.label || "Untitled").trim() || "Untitled",
+                    href: raw.href,
+                    depth,
+                    index: resolveIndex(raw.href),
+                  });
+                }
                 if (raw?.subitems) walk(raw.subitems, depth + 1);
               }
             };
@@ -509,7 +529,18 @@ function ReaderInner() {
                   className={`reader-toc-item ${c.href === currentHref ? "on" : ""}`}
                   style={{ paddingLeft: 12 + Math.min(c.depth, 3) * 14 }}
                   onClick={() => {
-                    renditionRef.current?.display(c.href);
+                    const target = c.index != null ? c.index : c.href;
+                    try {
+                      Promise.resolve(renditionRef.current?.display(target)).catch(() => {
+                        // Some producers ship nav hrefs that resolve to nothing;
+                        // fall back to the raw href once, then give up quietly.
+                        if (c.index != null) {
+                          Promise.resolve(renditionRef.current?.display(c.href)).catch(() => {});
+                        }
+                      });
+                    } catch {
+                      // rendition destroyed mid-flight
+                    }
                     setTocOpen(false);
                   }}
                 >
