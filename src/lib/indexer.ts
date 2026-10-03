@@ -1,5 +1,3 @@
-import path from "path";
-
 /**
  * EPUB content indexing for in-book search.
  *

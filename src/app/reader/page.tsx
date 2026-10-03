@@ -14,12 +14,20 @@ function ReaderInner() {
   const [fontSize, setFontSize] = useState(16);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<{ chapter: string | null; snippet: string | null }[]>([]);
+  const [searchResults, setSearchResults] = useState<{ chapter: string | null; snippet: string | null; position: number | null }[]>([]);
   const [searched, setSearched] = useState(false);
   const [pageInfo, setPageInfo] = useState("—");
   const [hasPrev, setHasPrev] = useState(false);
   const [hasNext, setHasNext] = useState(false);
   const [navTick, setNavTick] = useState(0);
+  const [tocOpen, setTocOpen] = useState(false);
+  const [toc, setToc] = useState<{ label: string; href: string; depth: number }[]>([]);
+  const [currentHref, setCurrentHref] = useState<string | null>(null);
+  const [typeOpen, setTypeOpen] = useState(false);
+  const [fontFamily, setFontFamily] = useState<"serif" | "sans" | "mono">("serif");
+  const [lineHeight, setLineHeight] = useState(1.65);
+  const [margin, setMargin] = useState(18);
+  const [justify, setJustify] = useState(true);
 
   const viewerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -37,27 +45,61 @@ function ReaderInner() {
     const isDark = saved ? saved === "dark" : true;
     setDark(isDark);
     setFontSize(parseInt(localStorage.getItem("reader-font-size") || "16", 10));
+    const fam = localStorage.getItem("reader-font-family");
+    if (fam === "serif" || fam === "sans" || fam === "mono") setFontFamily(fam);
+    const lh = parseFloat(localStorage.getItem("reader-line-height") || "");
+    if (lh >= 1.2 && lh <= 2.4) setLineHeight(lh);
+    const mg = parseInt(localStorage.getItem("reader-margin") || "", 10);
+    if (!Number.isNaN(mg) && mg >= 0 && mg <= 64) setMargin(mg);
+    setJustify(localStorage.getItem("reader-justify") !== "0");
   }, []);
+
+  const FONT_STACKS: Record<string, string> = {
+    serif: 'Georgia, "Iowan Old Style", "Times New Roman", serif',
+    sans: 'ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif',
+    mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+  };
 
   const applyReaderTheme = useCallback((isDark: boolean) => {
     try {
       const themes = renditionRef.current?.themes;
       if (!themes) return;
+      const stack = FONT_STACKS[fontFamily] || FONT_STACKS.serif;
+      const pad = `${margin}px ${Math.round(margin * 1.6)}px`;
+      const align = justify ? "justify" : "left";
+      const shared = {
+        "html, body": {
+          "font-family": `${stack} !important`,
+          "line-height": `${lineHeight} !important`,
+          padding: `${pad} !important`,
+          background: "transparent !important",
+        },
+        "p, div, span, li, blockquote": {
+          "font-family": `${stack} !important`,
+          "line-height": `${lineHeight} !important`,
+          "text-align": `${align} !important`,
+        },
+      };
       themes.register("nmlr-dark", {
+        ...shared,
         body: { background: "#0e0e12 !important", color: "#d6d4e0 !important" },
-        a: { color: "#a78bfa !important" },
-        "p, div, span": { "line-height": "1.65 !important" },
+        a: { color: "#e0a458 !important" },
       });
       themes.register("nmlr-light", {
+        ...shared,
         body: { background: "#faf9f6 !important", color: "#2a2a32 !important" },
-        a: { color: "#7c3aed !important" },
-        "p, div, span": { "line-height": "1.65 !important" },
+        a: { color: "#a5661f !important" },
       });
       themes.select(isDark ? "nmlr-dark" : "nmlr-light");
     } catch {
       // PDF mode — no rendition
     }
-  }, []);
+  }, [fontFamily, lineHeight, margin, justify]);
+
+  // Re-register epub.js themes whenever typography prefs change.
+  useEffect(() => {
+    applyReaderTheme(dark);
+  }, [applyReaderTheme, dark]);
 
   const toggleTheme = () => {
     const next = !dark;
@@ -173,10 +215,31 @@ function ReaderInner() {
             setPageInfo(page ? `${page} / ${total || "?"}` : `${Math.round(percentRef.current)}%`);
             setHasPrev(percentRef.current > 0.5);
             setHasNext(percentRef.current < 99.5);
+            if (location.start.href) setCurrentHref(location.start.href);
           });
           await rendition.display();
           // Apply the user's theme (may have loaded from localStorage after mount).
           applyReaderTheme(dark);
+
+          // Table of contents for the chapter drawer. Flatten nested nav into
+          // one list; depth drives indentation. Runs after first paint so it
+          // never delays the opening page.
+          try {
+            const nav = await epub.loaded.navigation;
+            const items: { label: string; href: string; depth: number }[] = [];
+            const walk = (nodes: unknown, depth: number) => {
+              if (!Array.isArray(nodes) || items.length >= 400) return;
+              for (const raw of nodes as { label?: string; href?: string; subitems?: unknown }[]) {
+                if (items.length >= 400) break;
+                if (raw?.href) items.push({ label: (raw.label || "Untitled").trim() || "Untitled", href: raw.href, depth });
+                if (raw?.subitems) walk(raw.subitems, depth + 1);
+              }
+            };
+            walk((nav as { toc?: unknown } | null)?.toc, 0);
+            if (!cancelled) setToc(items);
+          } catch {
+            // Books without a usable nav are fine — the drawer just stays empty.
+          }
 
           // Keep the rendition matched to the container: rotation, window
           // resize, toolbar/search panel collapsing in/out.
@@ -213,8 +276,11 @@ function ReaderInner() {
           if (initialPercent > 0 && initialPercent < 100) {
             try {
               await gen;
-              const target = Math.floor((initialPercent / 100) * epub.locations.length());
-              if (target > 0 && !cancelled) await rendition.display(target);
+              // Pass the percentage as a 0-1 FLOAT: epubjs converts it with
+              // cfiFromPercentage once locations exist. (A locations *index*
+              // would be read as a spine index and reject with
+              // "No Section Found" — resume silently failing on real books.)
+              if (!cancelled) await rendition.display(initialPercent / 100);
             } catch {
               // skip resume silently; reader stays on page 1
             }
@@ -336,6 +402,12 @@ function ReaderInner() {
       if ((e.target as HTMLElement)?.tagName === "INPUT") return;
       if (e.key === "ArrowLeft") goPrev();
       if (e.key === "ArrowRight") goNext();
+      if (e.key === "Escape") {
+        setTocOpen(false);
+        setTypeOpen(false);
+        setShowSearch(false);
+      }
+      if ((e.key === "t" || e.key === "T") && !e.metaKey && !e.ctrlKey) setTocOpen((v) => !v);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -394,6 +466,21 @@ function ReaderInner() {
           <button className="btn-icon desk-only" onClick={() => changeFont(2)} title="Increase font size" aria-label="Increase font size">
             A+
           </button>
+          {isEpub && (
+            <button className="btn-icon desk-only" onClick={() => { setTypeOpen((v) => !v); setTocOpen(false); }} title="Reading type" aria-label="Reading type">
+              Aa
+            </button>
+          )}
+          {isEpub && (
+            <button
+              className={`btn-icon desk-only ${tocOpen ? "active" : ""}`}
+              onClick={() => { setTocOpen((v) => !v); setTypeOpen(false); }}
+              title="Contents (T)"
+              aria-label="Contents"
+            >
+              ☰
+            </button>
+          )}
           <button className="btn-icon desk-only" onClick={toggleTheme} title="Toggle reading theme" aria-label="Toggle reading theme">
             {dark ? "☀" : "🌙"}
           </button>
@@ -402,6 +489,76 @@ function ReaderInner() {
           </button>
         </div>
       </div>
+
+      {isEpub && tocOpen && (
+        <div className="reader-toc">
+          <div className="reader-toc-head">Contents</div>
+          <div className="reader-toc-list">
+            {toc.length === 0 ? (
+              <div className="reader-toc-empty">This book lists no chapters.</div>
+            ) : (
+              toc.map((c, i) => (
+                <button
+                  key={i}
+                  className={`reader-toc-item ${c.href === currentHref ? "on" : ""}`}
+                  style={{ paddingLeft: 12 + Math.min(c.depth, 3) * 14 }}
+                  onClick={() => {
+                    renditionRef.current?.display(c.href);
+                    setTocOpen(false);
+                  }}
+                >
+                  {c.label}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {isEpub && typeOpen && (
+        <div className="reader-type">
+          {(
+            [
+              ["Typeface", ([["serif", "Serif"], ["sans", "Sans"], ["mono", "Mono"]] as [string, string][]).map(([v, lbl]) => ({
+                label: lbl,
+                on: fontFamily === v,
+                act: () => {
+                  setFontFamily(v as "serif" | "sans" | "mono");
+                  localStorage.setItem("reader-font-family", v);
+                },
+              }))],
+              ["Leading", ([["Compact", 1.45], ["Book", 1.65], ["Airy", 1.9]] as [string, number][]).map(([lbl, v]) => ({
+                label: lbl,
+                on: lineHeight === v,
+                act: () => {
+                  setLineHeight(v);
+                  localStorage.setItem("reader-line-height", String(v));
+                },
+              }))],
+              ["Margins", ([["Tight", 8], ["Medium", 18], ["Wide", 32]] as [string, number][]).map(([lbl, v]) => ({
+                label: lbl,
+                on: margin === v,
+                act: () => {
+                  setMargin(v);
+                  localStorage.setItem("reader-margin", String(v));
+                },
+              }))],
+              ["Justify", [{ label: justify ? "On" : "Off", on: justify, act: () => { setJustify((j) => !j); localStorage.setItem("reader-justify", justify ? "0" : "1"); } }]],
+            ] as [string, { label: string; on: boolean; act: () => void }[]][]
+          ).map(([group, opts]) => (
+            <div key={group} className="rt-row">
+              <span className="rt-label">{group}</span>
+              <div className="rt-seg">
+                {opts.map((o) => (
+                  <button key={o.label} className={o.on ? "on" : ""} onClick={o.act}>
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {showSearch && (
         <div className="reader-search">
@@ -420,10 +577,18 @@ function ReaderInner() {
           {searchResults.length > 0 ? (
             <div className="reader-search-results">
               {searchResults.map((r, i) => (
-                <div key={i} className="reader-search-result">
+                <button
+                  key={i}
+                  className="reader-search-result"
+                  onClick={() => {
+                    if (r.position != null) renditionRef.current?.display(r.position);
+                    setShowSearch(false);
+                  }}
+                  title={r.position != null ? "Jump to this chapter" : undefined}
+                >
                   <div className="rs-chapter">{r.chapter || "—"}</div>
                   <div className="rs-snippet">{r.snippet}</div>
-                </div>
+                </button>
               ))}
             </div>
           ) : searched ? (

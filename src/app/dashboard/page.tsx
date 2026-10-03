@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import GeneratedCover from "@/components/GeneratedCover";
 
 interface Book {
   id: string;
@@ -21,13 +22,6 @@ interface Shelf {
   name: string;
   color: string;
   book_count: number;
-}
-
-interface UploadQueueItem {
-  name: string;
-  status: "pending" | "compressing" | "uploading" | "processing" | "done" | "error";
-  percent: number;
-  message?: string;
 }
 
 interface UploadQueueItem {
@@ -72,19 +66,14 @@ const MEDIA_LABELS: Record<string, string> = {
 
 const MEDIA_CYCLE = ["book", "ln", "manga", "anime_official"];
 
-const BOOK_SVG = (
-  <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
-    <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
-  </svg>
-);
+type SortKey = "recent" | "title" | "author" | "progress";
 
-const VIDEO_SVG = (
-  <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-    <polygon points="23 7 16 12 23 17 23 7" />
-    <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-  </svg>
-);
+const SORTS: { value: SortKey; label: string }[] = [
+  { value: "recent", label: "Recently opened" },
+  { value: "title", label: "Title A–Z" },
+  { value: "author", label: "Author A–Z" },
+  { value: "progress", label: "Furthest read" },
+];
 
 function greetingFor(hour: number): { title: string; sub: string } {
   if (hour < 5) return { title: "Burning the midnight oil", sub: "The quietest hours make the best reading." };
@@ -114,6 +103,11 @@ export default function DashboardPage() {
   const [shelfPick, setShelfPick] = useState<Book | null>(null);
   const [shelfPickIds, setShelfPickIds] = useState<Set<string>>(new Set());
   const [greeting, setGreeting] = useState(() => greetingFor(12));
+  const [sort, setSort] = useState<"recent" | "title" | "author" | "progress">("recent");
+  const [goal, setGoalState] = useState(30);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteQ, setPaletteQ] = useState("");
+  const [paletteIdx, setPaletteIdx] = useState(0);
 
   const showToast = useCallback((kind: "ok" | "err", text: string) => {
     setToast({ kind, text });
@@ -170,7 +164,38 @@ export default function DashboardPage() {
     loadShelves();
     loadStats();
     setGreeting(greetingFor(new Date().getHours()));
+    const savedSort = localStorage.getItem("nmlr-sort");
+    if (savedSort === "recent" || savedSort === "title" || savedSort === "author" || savedSort === "progress") {
+      setSort(savedSort);
+    }
+    const savedGoal = parseInt(localStorage.getItem("nmlr-goal") || "", 10);
+    if (!Number.isNaN(savedGoal) && savedGoal >= 5 && savedGoal <= 240) setGoalState(savedGoal);
   }, [loadBooks, loadShelves, loadStats]);
+
+  const changeSort = (v: "recent" | "title" | "author" | "progress") => {
+    setSort(v);
+    localStorage.setItem("nmlr-sort", v);
+  };
+
+  const setGoal = (v: number) => {
+    setGoalState(v);
+    localStorage.setItem("nmlr-goal", String(v));
+  };
+
+  // Cmd/Ctrl-K opens the command palette from anywhere on the dashboard.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+        setPaletteQ("");
+        setPaletteIdx(0);
+      }
+      if (e.key === "Escape") setPaletteOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     setDrawerOpen(false);
@@ -495,15 +520,91 @@ export default function DashboardPage() {
   };
 
   // ---------------- Derived data ----------------
-  const filtered = (books || []).filter((b) => {
+  const filtered = useMemo(() => {
     const q = search.toLowerCase();
-    return (
-      !q ||
-      b.title?.toLowerCase().includes(q) ||
-      b.author?.toLowerCase().includes(q) ||
-      b.tags?.toLowerCase().includes(q)
+    const list = (books || []).filter(
+      (b) =>
+        !q ||
+        b.title?.toLowerCase().includes(q) ||
+        b.author?.toLowerCase().includes(q) ||
+        b.tags?.toLowerCase().includes(q)
     );
-  });
+    if (sort === "recent") return list; // server order: last read, then shelved
+    const collator = new Intl.Collator(undefined, { sensitivity: "base" });
+    if (sort === "title") return [...list].sort((a, b) => collator.compare(a.title || "", b.title || ""));
+    if (sort === "author") return [...list].sort((a, b) => collator.compare(a.author || "", b.author || ""));
+    return [...list].sort(
+      (a, b) => (b.progress > 0 ? 1 : 0) - (a.progress > 0 ? 1 : 0) || b.progress - a.progress
+    );
+  }, [books, search, sort]);
+
+  // Streak: consecutive days read, ending today (or yesterday — today's
+  // session hasn't happened yet until the lamps are lit).
+  const streak = useMemo(() => {
+    const read = new Set(activity.filter((a) => a.minutes > 0.02).map((a) => a.date));
+    let streak = 0;
+    const d = new Date();
+    if (!read.has(d.toISOString().slice(0, 10))) d.setDate(d.getDate() - 1);
+    while (read.has(d.toISOString().slice(0, 10))) {
+      streak++;
+      d.setDate(d.getDate() - 1);
+    }
+    return streak;
+  }, [activity]);
+
+  const todayMinutes = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    return activity.find((a) => a.date === today)?.minutes ?? 0;
+  }, [activity]);
+
+  // Command palette items: books first, then navigation, then actions.
+  const paletteItems = useMemo(() => {
+    const q = paletteQ.trim().toLowerCase();
+    const close = () => setPaletteOpen(false);
+    const items: { group: string; icon: string; label: string; hint: string; run: () => void }[] = [];
+    const matched = (books || [])
+      .filter((b) => !q || b.title?.toLowerCase().includes(q) || b.author?.toLowerCase().includes(q))
+      .slice(0, q ? 8 : 6);
+    for (const b of matched) {
+      items.push({
+        group: "Books",
+        icon: b.file_type === "epub" ? "📖" : b.file_type === "pdf" ? "📄" : "🎞",
+        label: b.title,
+        hint: b.author || MEDIA_LABELS[b.media_type] || "",
+        run: () => {
+          router.push(openTarget(b));
+          close();
+        },
+      });
+    }
+    const navItems: [string, string, Filter][] = [
+      ["◈", "Currently Reading", "recent"],
+      ["♥", "Favorites", "favorites"],
+      ["▦", "All Media", "all"],
+      ...SECTIONS.map((s) => [s.icon, s.label, s.key] as [string, string, Filter]),
+      ...shelves.map((s) => ["◧", s.name, `shelf:${s.id}` as Filter] as [string, string, Filter]),
+    ];
+    for (const [icon, label, f] of navItems) {
+      if (q && !label.toLowerCase().includes(q)) continue;
+      items.push({ group: "Go to", icon, label, hint: "shelf", run: () => { setFilter(f); close(); } });
+    }
+    items.push({ group: "Actions", icon: "↑", label: "Add a book", hint: "upload", run: () => { setUploadOpen(true); close(); } });
+    items.push({ group: "Actions", icon: "⚙", label: "Settings", hint: "", run: () => { router.push("/settings"); close(); } });
+    if ((books || []).length > 0) {
+      items.push({
+        group: "Actions",
+        icon: "✦",
+        label: "Surprise me",
+        hint: "random book",
+        run: () => {
+          const pool = books || [];
+          router.push(openTarget(pool[Math.floor(Math.random() * pool.length)]));
+          close();
+        },
+      });
+    }
+    return items;
+  }, [books, paletteQ, router, shelves]);
 
   const [shelfBookIds, setShelfBookIds] = useState<Set<string> | null>(null);
 
@@ -600,10 +701,11 @@ export default function DashboardPage() {
         // eslint-disable-next-line @next/next/no-img-element
         <img src={book.cover_url} alt="" loading="lazy" />
       ) : (
-        <div className="book-cover-placeholder">
-          {isVideo(book) ? VIDEO_SVG : BOOK_SVG}
-          <span>{book.file_type.toUpperCase()}</span>
-        </div>
+        <GeneratedCover
+          title={book.title}
+          author={book.author}
+          kicker={isVideo(book) ? "Film" : MEDIA_LABELS[book.media_type] || book.file_type.toUpperCase()}
+        />
       )}
       <span className={`book-type-badge media-${book.media_type}`}>
         {MEDIA_LABELS[book.media_type] || book.file_type}
@@ -818,6 +920,33 @@ export default function DashboardPage() {
               )}
             </div>
             <div className="view-controls">
+              <button
+                className="btn-icon bordered palette-trigger"
+                onClick={() => {
+                  setPaletteQ("");
+                  setPaletteIdx(0);
+                  setPaletteOpen(true);
+                }}
+                title="Command palette (⌘K)"
+                aria-label="Open command palette"
+              >
+                <span className="kbd-glyph">⌘K</span>
+              </button>
+              <label className="sort-select" title="Sort the shelves">
+                <span className="sort-label">Sort</span>
+                <select
+                  className="select-input sort-input"
+                  value={sort}
+                  onChange={(e) => changeSort(e.target.value as SortKey)}
+                  aria-label="Sort books"
+                >
+                  {SORTS.map((s) => (
+                    <option key={s.value} value={s.value}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <button className={`btn-icon bordered ${view === "grid" ? "active" : ""}`} onClick={() => setView("grid")} title="Grid view" aria-label="Grid view">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <rect x="3" y="3" width="7" height="7" />
@@ -884,6 +1013,46 @@ export default function DashboardPage() {
               <div className="stat-card">
                 <div className="stat-value">{fmtBytes(stats.storageUsedBytes)}</div>
                 <div className="stat-label">On the shelves</div>
+              </div>
+            </div>
+          )}
+
+          {activity.length > 0 && (
+            <div className="ritual-card">
+              <div className="goal-ring" role="img" aria-label={`${Math.round(todayMinutes)} of ${goal} minutes read today`}>
+                <svg viewBox="0 0 64 64" aria-hidden="true">
+                  <circle className="goal-track" cx="32" cy="32" r="26" />
+                  <circle
+                    className={`goal-fill ${todayMinutes >= goal ? "met" : ""}`}
+                    cx="32"
+                    cy="32"
+                    r="26"
+                    strokeDasharray={`${Math.min(1, goal > 0 ? todayMinutes / goal : 0) * 163.36} 163.36`}
+                  />
+                </svg>
+                <span className="goal-num">{Math.round(todayMinutes)}</span>
+              </div>
+              <div className="ritual-body">
+                <div className="ritual-title">
+                  {streak > 0
+                    ? `${streak} night${streak === 1 ? "" : "s"} in a row at the lamp`
+                    : todayMinutes >= goal
+                      ? "Tonight's reading ritual is complete"
+                      : "Tonight's reading ritual"}
+                </div>
+                <div className="ritual-sub">
+                  {todayMinutes >= goal
+                    ? `You read ${Math.round(todayMinutes)} min against a ${goal} min goal. Close the book satisfied.`
+                    : `${Math.max(0, goal - Math.round(todayMinutes))} more minutes to tonight's goal of ${goal}.`}
+                </div>
+                <div className="ritual-goal">
+                  <span>Daily goal</span>
+                  <div className="goal-stepper">
+                    <button onClick={() => setGoal(Math.max(5, goal - 5))} aria-label="Decrease daily goal">−</button>
+                    <b>{goal}m</b>
+                    <button onClick={() => setGoal(Math.min(240, goal + 5))} aria-label="Increase daily goal">+</button>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -976,10 +1145,8 @@ export default function DashboardPage() {
                     {book.cover_url ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img src={book.cover_url} alt="" loading="lazy" />
-                    ) : isVideo(book) ? (
-                      "VID"
                     ) : (
-                      book.file_type.toUpperCase()
+                      <GeneratedCover title={book.title} author={book.author} />
                     )}
                   </div>
                   <div className="row-main">
@@ -1130,6 +1297,75 @@ export default function DashboardPage() {
                   ))}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {paletteOpen && (
+        <div
+          className="palette-backdrop"
+          onClick={(e) => e.target === e.currentTarget && setPaletteOpen(false)}
+        >
+          <div
+            className="palette"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Command palette"
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setPaletteIdx((i) => (paletteItems.length ? (i + 1) % paletteItems.length : 0));
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setPaletteIdx((i) => (paletteItems.length ? (i - 1 + paletteItems.length) % paletteItems.length : 0));
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                paletteItems[paletteIdx]?.run();
+              } else if (e.key === "Escape") {
+                setPaletteOpen(false);
+              }
+            }}
+          >
+            <input
+              className="palette-input"
+              autoFocus
+              value={paletteQ}
+              onChange={(e) => {
+                setPaletteQ(e.target.value);
+                setPaletteIdx(0);
+              }}
+              placeholder="Find a book, a shelf, an action…"
+              aria-label="Command palette query"
+            />
+            <div className="palette-list">
+              {paletteItems.length === 0 ? (
+                <div className="palette-empty">Nothing in the stacks answers to that.</div>
+              ) : (
+                paletteItems.map((item, i) => (
+                  <div key={`${item.group}-${item.label}-${i}`} className="palette-group">
+                    {(i === 0 || paletteItems[i - 1].group !== item.group) && (
+                      <div className="palette-group-label">{item.group}</div>
+                    )}
+                    <button
+                      className={`palette-item ${i === paletteIdx ? "on" : ""}`}
+                      onMouseEnter={() => setPaletteIdx(i)}
+                      onClick={() => item.run()}
+                    >
+                      <span className="palette-icon">{item.icon}</span>
+                      <span className="palette-text">
+                        <span className="palette-item-label">{item.label}</span>
+                        {item.hint && <span className="palette-item-hint">{item.hint}</span>}
+                      </span>
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="palette-foot">
+              <span>↑ ↓ to move</span>
+              <span>↵ to open</span>
+              <span>esc to dismiss</span>
             </div>
           </div>
         </div>
