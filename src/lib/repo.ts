@@ -465,6 +465,62 @@ export async function listShelfBooks(
   return result.rows.map((r) => r as never);
 }
 
+/**
+ * The books on a shelf, with everything a jacket needs: cover, media type,
+ * progress and last_read_at. Same rows as listShelfBooks plus the two fields
+ * the shelf card needs to pick a cover.
+ */
+export async function listShelfJacket(shelfId: string): Promise<
+  {
+    id: string;
+    title: string;
+    author: string | null;
+    file_type: string;
+    media_type: string;
+    cover_url: string | null;
+    progress: number;
+    last_read_at: number | null;
+  }[]
+> {
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
+    const { data, error } = await sb
+      .from("shelf_items")
+      .select("book_id, books(id, title, author, file_type, media_type, cover_url, last_read_at, progress(percent))")
+      .eq("shelf_id", shelfId);
+    if (error) throw new Error(error.message);
+    return (data || [])
+      .map((row: Record<string, unknown>) => {
+        const b = row.books as Record<string, unknown> | null;
+        if (!b) return null;
+        const prog = b.progress as { percent: number }[] | null;
+        return {
+          id: b.id as string,
+          title: b.title as string,
+          author: (b.author as string) || null,
+          file_type: b.file_type as string,
+          media_type: (b.media_type as string) || "book",
+          cover_url: (b.cover_url as string) || null,
+          progress: prog?.[0]?.percent ?? 0,
+          last_read_at: (b.last_read_at as number) ?? null,
+        };
+      })
+      .filter(Boolean) as never;
+  }
+
+  await ensureMigrated();
+  const result = await (await sql()).execute({
+    sql: `SELECT b.id, b.title, b.author, b.file_type, COALESCE(b.media_type, 'book') as media_type,
+                 b.cover_url, b.last_read_at, COALESCE(p.percent, 0) as progress
+          FROM shelf_items si
+          JOIN books b ON si.book_id = b.id
+          LEFT JOIN progress p ON b.id = p.book_id
+          WHERE si.shelf_id = ?`,
+    args: [shelfId],
+  });
+  return result.rows.map((r) => r as never);
+}
+
 // ======================= Reading sessions =======================
 
 export interface ReadingSession {

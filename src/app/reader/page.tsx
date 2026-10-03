@@ -8,7 +8,7 @@ function ReaderInner() {
   const searchParams = useSearchParams();
   const id = searchParams.get("id");
 
-  const [book, setBook] = useState<{ title: string; file_type: string } | null>(null);
+  const [book, setBook] = useState<{ title: string; file_type: string; author?: string | null } | null>(null);
   const [error, setError] = useState("");
   const [dark, setDark] = useState(true);
   const [fontSize, setFontSize] = useState(16);
@@ -28,6 +28,25 @@ function ReaderInner() {
   const [lineHeight, setLineHeight] = useState(1.65);
   const [margin, setMargin] = useState(18);
   const [justify, setJustify] = useState(true);
+  // ---- Highlights, notes and bookmarks (Kindle / Play Books parity) ----
+  const [notes, setNotes] = useState<
+    { id: string; kind: "highlight" | "bookmark"; text: string; note: string; anchor: string; chapter: string; percent: number; created: number; color: string }[]
+  >([]);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [selection, setSelection] = useState<{ text: string; cfi: string } | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
+
+  const loadNotes = useCallback(async () => {
+    if (!id) return;
+    try {
+      const res = await fetch(`/api/books/${id}/notes`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setNotes(Array.isArray(data.notes) ? data.notes : []);
+    } catch {
+      // non-fatal — highlighting is an enhancement, never a blocker
+    }
+  }, [id]);
 
   const viewerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -67,27 +86,61 @@ function ReaderInner() {
       const stack = FONT_STACKS[fontFamily] || FONT_STACKS.serif;
       const pad = `${margin}px ${Math.round(margin * 1.6)}px`;
       const align = justify ? "justify" : "left";
-      const shared = {
+      // Common ground shared by both themes. `!important` is not optional: an
+      // EPUB ships its own stylesheet and wins every cascade battle otherwise,
+      // which is how you end up reading 12px Arial inside a 1200px column with
+      // a cover image blowing the page wide.
+      const shared: Record<string, Record<string, string>> = {
         "html, body": {
           "font-family": `${stack} !important`,
           "line-height": `${lineHeight} !important`,
           padding: `${pad} !important`,
           background: "transparent !important",
+          margin: "0 !important",
+          width: "auto !important",
+          "max-width": "100% !important",
+          "-webkit-text-size-adjust": "100% !important",
         },
-        "p, div, span, li, blockquote": {
+        "p, div, span, li, blockquote, td, th, dd, dt": {
           "font-family": `${stack} !important`,
           "line-height": `${lineHeight} !important`,
           "text-align": `${align} !important`,
+          "max-width": "100% !important",
         },
+        p: {
+          margin: "0 0 0.9em !important",
+          "text-indent": "0 !important",
+          "word-spacing": "normal !important",
+          "letter-spacing": "normal !important",
+        },
+        "h1, h2, h3, h4, h5, h6": {
+          "font-family": `${stack} !important`,
+          "line-height": "1.25 !important",
+          "text-align": "left !important",
+          margin: "1.6em 0 0.6em !important",
+          "page-break-after": "avoid !important",
+        },
+        // Illustrations and cover plates are the single most common cause of a
+        // "broken looking" EPUB page: they ship at print resolution.
+        img: {
+          "max-width": "100% !important",
+          height: "auto !important",
+          "object-fit": "contain !important",
+        },
+        "svg, video": { "max-width": "100% !important", height: "auto !important" },
+        table: { "max-width": "100% !important", "border-collapse": "collapse !important" },
+        pre: { "white-space": "pre-wrap !important", "word-break": "break-word !important" },
+        "hr, hr *": { "max-width": "100% !important" },
+        a: { "text-decoration-thickness": "1px !important" },
       };
       themes.register("nmlr-dark", {
         ...shared,
-        body: { background: "#0e0e12 !important", color: "#d6d4e0 !important" },
+        body: { background: "#12100e !important", color: "#e6ddcc !important" },
         a: { color: "#e0a458 !important" },
       });
       themes.register("nmlr-light", {
         ...shared,
-        body: { background: "#faf9f6 !important", color: "#2a2a32 !important" },
+        body: { background: "#faf7f0 !important", color: "#2a2620 !important" },
         a: { color: "#a5661f !important" },
       });
       themes.select(isDark ? "nmlr-dark" : "nmlr-light");
@@ -100,6 +153,83 @@ function ReaderInner() {
   useEffect(() => {
     applyReaderTheme(dark);
   }, [applyReaderTheme, dark]);
+
+  const saveHighlight = async () => {
+    if (!id || !selection) return;
+    try {
+      const res = await fetch(`/api/books/${id}/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "highlight",
+          text: selection.text,
+          anchor: selection.cfi,
+          note: noteDraft,
+          chapter: currentHref || "",
+          percent: Math.round(percentRef.current),
+        }),
+      });
+      if (res.ok) {
+        await loadNotes();
+        setSelection(null);
+        setNoteDraft("");
+      }
+    } catch {
+      // non-fatal
+    }
+  };
+
+  const addBookmark = async () => {
+    if (!id) return;
+    try {
+      const res = await fetch(`/api/books/${id}/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "bookmark",
+          text: "",
+          anchor: currentHref || "",
+          chapter: currentHref || "",
+          percent: Math.round(percentRef.current),
+        }),
+      });
+      if (res.ok) await loadNotes();
+    } catch {
+      // non-fatal
+    }
+  };
+
+  const removeNote = async (noteId: string) => {
+    if (!id) return;
+    try {
+      const res = await fetch(`/api/books/${id}/notes?id=${encodeURIComponent(noteId)}`, { method: "DELETE" });
+      if (res.ok) setNotes((n) => n.filter((x) => x.id !== noteId));
+    } catch {
+      // non-fatal
+    }
+  };
+
+  /** Export every highlight as Markdown — Kindle "My Highlights" parity. */
+  const exportHighlights = () => {
+    if (!book || notes.length === 0) return;
+    const lines = [`# ${book.title}`, book.author ? `_${book.author}_` : "", ""];
+    for (const n of notes) {
+      if (n.kind === "bookmark") {
+        lines.push(`**Bookmark** — ${Math.round(n.percent)}% in`, "");
+        continue;
+      }
+      lines.push(`> ${n.text.replace(/\n+/g, "\n> ")}`);
+      if (n.note) lines.push("", `**Note:** ${n.note}`);
+      lines.push("", `— ${Math.round(n.percent)}% in`, "");
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(book.title || "highlights").replace(/[^\w\d-]+/g, "_").slice(0, 60)}_highlights.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const toggleTheme = () => {
     const next = !dark;
@@ -174,10 +304,23 @@ function ReaderInner() {
           // happened to measure mid-layout (race → tiny reader that survives
           // resizes). Measure after layout settles, then ResizeObserver keeps
           // it correct on phone rotation AND desktop window resizes.
-          const measure = () => ({
-            width: Math.max(200, host.clientWidth || window.innerWidth),
-            height: Math.max(200, host.clientHeight || Math.round(window.innerHeight * 0.8)),
-          });
+          //
+          // The width is CAPPED. epub.js lays the book out in CSS columns as
+          // wide as the container, so a 1440px window produced a 140-character
+          // line — technically "filling the screen" and unreadable in practice.
+          // A page of prose wants roughly 60-80 characters; 760px of a ~17px
+          // serif lands there. On a phone the cap never binds and the reader
+          // stays full-bleed.
+          const MAX_MEASURE = 760;
+          const MIN_MEASURE = 280;
+          const measure = () => {
+            const hostW = host.clientWidth || window.innerWidth;
+            const hostH = host.clientHeight || Math.round(window.innerHeight * 0.8);
+            return {
+              width: Math.max(MIN_MEASURE, Math.min(hostW, MAX_MEASURE)),
+              height: Math.max(200, hostH),
+            };
+          };
           const { width, height } = measure();
           const rendition = epub.renderTo(host, { width, height, flow: "paginated", spread: "none" });
           renditionRef.current = rendition;
@@ -281,6 +424,26 @@ function ReaderInner() {
           });
           ro.observe(host);
           resizeObserverRef.current = ro;
+
+          // Text selection → a highlightable passage. epub.js already emits
+          // "selected" with a CFI for the current selection; grabbing the text
+          // out of the rendition's own window is the only way to read what the
+          // reader actually highlighted.
+          rendition.on("selected", (cfiRange: string, contents: { window?: Window }) => {
+            if (!cfiRange) return;
+            try {
+              const sel = contents?.window?.getSelection?.();
+              const text = (sel?.toString() || "").trim();
+              if (!text) {
+                setSelection(null);
+                return;
+              }
+              setSelection({ text: text.slice(0, 4000), cfi: cfiRange });
+              setNoteDraft("");
+            } catch {
+              setSelection(null);
+            }
+          });
 
           // Generate locations so percentages and page numbers become real.
           // Fresh reads do it in the background (the spine fallback above keeps
@@ -486,6 +649,21 @@ function ReaderInner() {
           <button className="btn-icon" onClick={() => { setShowSearch(!showSearch); setSearched(false); setSearchResults([]); }} title="Search in book" aria-label="Search in book">
             🔍
           </button>
+          {isEpub && (
+            <button
+              className={`btn-icon keep-touch ${selection ? "armed" : ""} ${notes.length > 0 ? "has-notes" : ""}`}
+              onClick={() => { setNotesOpen((v) => !v); void loadNotes(); }}
+              title={notes.length ? `Notes & highlights (${notes.length})` : "Notes & highlights"}
+              aria-label="Notes and highlights"
+            >
+              ✎
+            </button>
+          )}
+          {isEpub && (
+            <button className="btn-icon keep-touch" onClick={addBookmark} title="Bookmark this page" aria-label="Bookmark this page">
+              ⚑
+            </button>
+          )}
           <button className="btn-icon desk-only" onClick={() => changeFont(-2)} title="Decrease font size" aria-label="Decrease font size">
             A−
           </button>
@@ -549,6 +727,73 @@ function ReaderInner() {
               ))
             )}
           </div>
+        </div>
+      )}
+
+      {isEpub && selection && (
+        <div className="reader-highlight-bar">
+          <div className="hl-quote">“{selection.text.slice(0, 180)}{selection.text.length > 180 ? "…" : ""}”</div>
+          <div className="hl-actions">
+            <input
+              className="hl-note-input"
+              value={noteDraft}
+              onChange={(e) => setNoteDraft(e.target.value)}
+              placeholder="Add a note (optional)…"
+              aria-label="Highlight note"
+            />
+            <button className="btn-icon bordered hl-keep" onClick={saveHighlight}>
+              Keep
+            </button>
+            <button className="btn-icon bordered" onClick={() => { setSelection(null); setNoteDraft(""); }} aria-label="Discard selection">
+              ×
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isEpub && notesOpen && (
+        <div className="reader-notes">
+          <div className="notes-head">
+            <span>Notebook — {notes.length} {notes.length === 1 ? "entry" : "entries"}</span>
+            {notes.length > 0 && (
+              <button className="btn-icon bordered" onClick={exportHighlights} title="Export as Markdown" aria-label="Export highlights">
+                ↓
+              </button>
+            )}
+          </div>
+          {notes.length === 0 ? (
+            <p className="notes-empty">
+              Select any passage in the book to highlight it, or drop a bookmark with ⚑. Everything lands here and
+              exports as Markdown.
+            </p>
+          ) : (
+            <div className="notes-list">
+              {notes.map((n) => (
+                <div key={n.id} className={`note-card ${n.kind}`}>
+                  <div className="note-head">
+                    <span className="note-kind">{n.kind === "bookmark" ? "⚑ bookmark" : "✎ highlight"}</span>
+                    <span className="note-pos">{Math.round(n.percent)}%</span>
+                    <button
+                      className="btn-icon"
+                      onClick={() => {
+                        if (n.anchor) Promise.resolve(renditionRef.current?.display(n.anchor)).catch(() => {});
+                        setNotesOpen(false);
+                      }}
+                      title="Jump here"
+                      aria-label="Jump to entry"
+                    >
+                      ↗
+                    </button>
+                    <button className="btn-icon" onClick={() => removeNote(n.id)} title="Delete" aria-label="Delete entry">
+                      ×
+                    </button>
+                  </div>
+                  {n.text && <div className="note-text">{n.text}</div>}
+                  {n.note && <div className="note-own">{n.note}</div>}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -641,7 +886,9 @@ function ReaderInner() {
             <p>Loading book…</p>
           </div>
         )}
-        <div ref={viewerRef} className={`epub-viewer ${isEpub ? "" : "hidden"}`} />
+        <div className={`reader-surface ${isEpub ? "" : "hidden"}`}>
+          <div ref={viewerRef} className="epub-viewer" />
+        </div>
         <div id="pdf-container" className={`pdf-container ${book?.file_type === "pdf" ? "" : "hidden"}`} />
       </div>
 

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import BookCover from "@/components/BookCover";
+import { compareBySeriesVolume, detectVolume, sortBySeriesVolume } from "@/lib/sortorder";
 
 interface Book {
   id: string;
@@ -17,11 +18,31 @@ interface Book {
   progress: number;
 }
 
+interface ShelfJacket {
+  id: string;
+  title: string;
+  author: string | null;
+  cover_url: string | null;
+  file_type: string;
+  media_type: string;
+  progress: number;
+  volume: number | null;
+  last_read_at: number | null;
+}
+
 interface Shelf {
   id: string;
   name: string;
   color: string;
   book_count: number;
+  /** The most recently read volume (or the highest one) — the shelf's cover. */
+  jacket?: ShelfJacket | null;
+  shelfProgress?: number;
+  highlights?: number;
+  /** Volume → progress, so a card can say which volume is next. */
+  entries?: { id: string; volume: number; progress: number }[];
+  /** Membership ids, so "Loose ends" needs no extra round-trip. */
+  bookIds?: string[];
 }
 
 interface UploadQueueItem {
@@ -108,6 +129,7 @@ export default function DashboardPage() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQ, setPaletteQ] = useState("");
   const [paletteIdx, setPaletteIdx] = useState(0);
+  const [looseOpen, setLooseOpen] = useState(false);
 
   const showToast = useCallback((kind: "ok" | "err", text: string) => {
     setToast({ kind, text });
@@ -530,9 +552,19 @@ export default function DashboardPage() {
         b.tags?.toLowerCase().includes(q)
     );
     if (sort === "recent") return list; // server order: last read, then shelved
-    const collator = new Intl.Collator(undefined, { sensitivity: "base" });
-    if (sort === "title") return [...list].sort((a, b) => collator.compare(a.title || "", b.title || ""));
-    if (sort === "author") return [...list].sort((a, b) => collator.compare(a.author || "", b.author || ""));
+    // "Title A–Z" is a SERIES/VOLUME order, not a dictionary one: nobody wants
+    // Volume 1, Volume 10, Volume 11, Volume 12, Volume 2. Text collation puts
+    // them in exactly that order, which is the bug that made a finished shelf
+    // look scrambled.
+    if (sort === "title") return sortBySeriesVolume(list);
+    if (sort === "author") {
+      const byAuthor = new Intl.Collator(undefined, { sensitivity: "base" });
+      // Authors, then series order within an author, so one author's volumes
+      // still run 1, 2, 3 rather than 1, 10, 11, 12, 2.
+      return [...list].sort(
+        (a, b) => byAuthor.compare(a.author || "", b.author || "") || compareBySeriesVolume(a, b)
+      );
+    }
     return [...list].sort(
       (a, b) => (b.progress > 0 ? 1 : 0) - (a.progress > 0 ? 1 : 0) || b.progress - a.progress
     );
@@ -608,6 +640,89 @@ export default function DashboardPage() {
 
   const [shelfBookIds, setShelfBookIds] = useState<Set<string> | null>(null);
 
+  /**
+   * Every book, in series/volume order — the order a reader expects and the
+   * order the sort control, the palette and the shelves all share.
+   */
+  const ordered = useMemo(() => sortBySeriesVolume(books || []), [books]);
+
+  /** Books that are not on any shelf, so nothing is unreachable. */
+  const [unshelvedIds, setUnshelvedIds] = useState<Set<string> | null>(null);
+
+  // Derived from the shelf membership the API already returns: any book that
+  // is on no shelf at all gets surfaced under "Loose ends" rather than
+  // disappearing between the shelf view and the flat grid.
+  useEffect(() => {
+    if (!books) {
+      setUnshelvedIds(null);
+      return;
+    }
+    const shelved = new Set(shelves.flatMap((s) => s.bookIds || []));
+    setUnshelvedIds(new Set(books.filter((b) => !shelved.has(b.id)).map((b) => b.id)));
+  }, [books, shelves]);
+
+  /** The front page: one card per shelf, plus a "Loose ends" shelf. */
+  const shelfCards = useMemo(() => {
+    const cards = shelves.map((s) => {
+      const entries = s.entries || [];
+      // "Up next" is the lowest volume nobody has finished yet; if nothing has
+      // been started, it is simply the first volume on the shelf.
+      const unfinished = entries.find((e) => e.progress < 99);
+      const started = entries.some((e) => e.progress > 0);
+      const nextUp = (unfinished && started ? unfinished : entries[0])?.volume ?? null;
+      const lastRead = s.jacket?.last_read_at
+        ? new Date(s.jacket.last_read_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+        : null;
+      return {
+        id: s.id,
+        name: s.name,
+        color: s.color,
+        count: s.book_count,
+        jacket: s.jacket ?? null,
+        shelfProgress: s.shelfProgress ?? 0,
+        highlights: s.highlights ?? 0,
+        nextUp,
+        lastRead,
+        virtual: false,
+        onOpen: () => { setLooseOpen(false); setFilter(`shelf:${s.id}`); },
+      };
+    });
+
+    if (unshelvedIds) {
+      const looseCount = [...unshelvedIds].length;
+      if (looseCount > 0) {
+        const loose = ordered.filter((b) => unshelvedIds.has(b.id));
+        const withProgress = loose.filter((b) => b.progress > 0);
+        const nextUp = loose
+          .map((b) => detectVolume(b.title))
+          .filter((v): v is number => v != null)
+          .sort((a, b) => a - b)[0];
+        cards.push({
+          id: "loose",
+          name: "Loose ends",
+          color: "#7d7261",
+          count: looseCount,
+          jacket: (withProgress[0] || loose[0])
+            ? {
+                ...(withProgress[0] || loose[0]!),
+                volume: detectVolume((withProgress[0] || loose[0])!.title),
+                last_read_at: null,
+              }
+            : null,
+          shelfProgress: loose.length
+            ? Math.round(loose.reduce((sum, b) => sum + b.progress, 0) / loose.length)
+            : 0,
+          highlights: 0,
+          nextUp: nextUp ?? null,
+          lastRead: null,
+          virtual: true,
+          onOpen: () => setLooseOpen(true),
+        });
+      }
+    }
+    return cards;
+  }, [shelves, unshelvedIds, ordered]);
+
   useEffect(() => {
     if (typeof filter === "string" && filter.startsWith("shelf:")) {
       const shelfId = filter.slice(6);
@@ -626,6 +741,7 @@ export default function DashboardPage() {
   }, [filter]);
 
   const visible = (() => {
+    if (looseOpen && unshelvedIds) return filtered.filter((b) => unshelvedIds.has(b.id));
     if (shelfBookIds) return filtered.filter((b) => shelfBookIds.has(b.id));
     if (filter.startsWith("sec:")) return filtered.filter((b) => b.media_type === filter.slice(4));
     if (filter === "epub") return filtered.filter((b) => b.file_type === "epub");
@@ -998,6 +1114,83 @@ export default function DashboardPage() {
               <h2>{greeting.title}</h2>
               <p>{greeting.sub}</p>
             </div>
+          )}
+
+          {/* Front page = shelves. A library is a set of shelves first and a
+              pile of files second, so the landing view leads with shelf
+              jackets and the book grid is one click behind. */}
+          {filter === "all" && (
+            <section className="shelf-board">
+              <div className="shelf-board-head">
+                <h3>
+                  <span className="shelf-glyph">▤</span> Your shelves
+                </h3>
+                <span className="shelf-board-hint">Click a shelf to open it</span>
+              </div>
+              <div className="shelf-rail">
+                {shelfCards.map((card) => (
+                  <div
+                    key={card.id}
+                    className={`shelf-card ${card.virtual ? "virtual" : ""}`}
+                    style={card.color ? ({ "--shelf-accent": card.color } as React.CSSProperties) : undefined}
+                    onClick={() => card.onOpen()}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => e.key === "Enter" && card.onOpen()}
+                  >
+                    <div className="shelf-card-jacket">
+                      {card.jacket ? (
+                        <BookCover
+                          bookId={card.jacket.id}
+                          coverUrl={card.jacket.cover_url}
+                          title={card.jacket.title}
+                          author={card.jacket.author}
+                          kicker={card.virtual ? undefined : MEDIA_LABELS[card.jacket.media_type] || card.jacket.file_type}
+                        />
+                      ) : (
+                        <div className="shelf-card-empty">
+                          <span>◧</span>
+                          <em>empty</em>
+                        </div>
+                      )}
+                      {card.shelfProgress > 0 && (
+                        <div className="shelf-card-ring" title={`${card.shelfProgress}% read across this shelf`}>
+                          <svg viewBox="0 0 36 36" aria-hidden="true">
+                            <circle className="ring-track" cx="18" cy="18" r="15.5" />
+                            <circle
+                              className="ring-fill"
+                              cx="18"
+                              cy="18"
+                              r="15.5"
+                              strokeDasharray={`${(card.shelfProgress / 100) * 97.4} 97.4`}
+                            />
+                          </svg>
+                          <span>{card.shelfProgress}%</span>
+                        </div>
+                      )}
+                    </div>
+                    <div className="shelf-card-body">
+                      <div className="shelf-card-name">{card.name}</div>
+                      <div className="shelf-card-meta">
+                        {card.count} {card.count === 1 ? "volume" : "volumes"}
+                        {card.nextUp != null && <span className="shelf-card-next"> · up next: vol {card.nextUp}</span>}
+                        {!!card.highlights && <span className="shelf-card-notes"> · {card.highlights} highlights</span>}
+                      </div>
+                      {card.lastRead && <div className="shelf-card-last">last: {card.lastRead}</div>}
+                    </div>
+                  </div>
+                ))}
+                <button className="shelf-card add-shelf-card" onClick={() => { setAddShelfOpen(true); setDrawerOpen(true); }}>
+                  <div className="shelf-card-jacket add">
+                    <span>＋</span>
+                  </div>
+                  <div className="shelf-card-body">
+                    <div className="shelf-card-name">New shelf</div>
+                    <div className="shelf-card-meta">group a series together</div>
+                  </div>
+                </button>
+              </div>
+            </section>
           )}
 
           {filter === "all" && continueReading.length > 0 && (
