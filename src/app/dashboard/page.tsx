@@ -667,9 +667,10 @@ export default function DashboardPage() {
       const entries = s.entries || [];
       // "Up next" is the lowest volume nobody has finished yet; if nothing has
       // been started, it is simply the first volume on the shelf.
-      const unfinished = entries.find((e) => e.progress < 99);
+      const unfinished = entries.find((e) => e.progress < 100);
       const started = entries.some((e) => e.progress > 0);
-      const nextUp = (unfinished && started ? unfinished : entries[0])?.volume ?? null;
+      const allDone = entries.length > 0 && entries.every((e) => e.progress >= 100);
+      const nextUp = allDone ? null : (unfinished && started ? unfinished : entries[0])?.volume ?? null;
       const lastRead = s.jacket?.last_read_at
         ? new Date(s.jacket.last_read_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })
         : null;
@@ -1131,7 +1132,7 @@ export default function DashboardPage() {
                 {shelfCards.map((card) => (
                   <div
                     key={card.id}
-                    className={`shelf-card ${card.virtual ? "virtual" : ""}`}
+                    className={`shelf-card ${card.virtual ? "virtual" : ""} ${card.shelfProgress >= 100 && !card.virtual ? "ring-done" : ""}`}
                     style={card.color ? ({ "--shelf-accent": card.color } as React.CSSProperties) : undefined}
                     onClick={() => card.onOpen()}
                     role="button"
@@ -1302,6 +1303,10 @@ export default function DashboardPage() {
             </div>
           )}
 
+          {/* THE FRONT PAGE IS SHELVES. On "all" the flat book grid is hidden
+              entirely — the shelf board, continue row and stats ARE the page.
+              Books appear when you open a shelf or explicitly pick "All Media"
+              (the ◈ All media entry), not as a second wall under the shelves. */}
           {filter !== "all" && (
             <div className="ink-rule" style={{ margin: "4px 0 18px" }}>
               {currentFilterLabel} · {visible.length} {visible.length === 1 ? "tale" : "tales"}
@@ -1313,7 +1318,7 @@ export default function DashboardPage() {
               <div className="spinner" />
               <p>Lighting the lamps…</p>
             </div>
-          ) : visible.length === 0 ? (
+          ) : filter === "all" ? null : visible.length === 0 ? (
             <div className="empty-state">
               <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
@@ -1342,7 +1347,9 @@ export default function DashboardPage() {
                   <div className="book-info">
                     <div className="book-title">{book.title}</div>
                     <div className="book-author">{book.author || "Unknown hand"}</div>
-                    {book.progress > 0 && (
+                    {book.progress >= 100 ? (
+                      <div className="book-finished">✓ finished</div>
+                    ) : book.progress > 0 && (
                       <div className="book-progress">
                         <div className="book-progress-fill" style={{ width: `${book.progress}%` }} />
                       </div>
@@ -1379,7 +1386,9 @@ export default function DashboardPage() {
                     </div>
                   </div>
                   <div className="row-progress">
-                    {book.progress > 0 ? (
+                    {book.progress >= 100 ? (
+                      <div className="book-finished">✓ finished</div>
+                    ) : book.progress > 0 ? (
                       <>
                         <div className="row-sub" style={{ fontSize: 11 }}>{book.progress}%</div>
                         <div className="book-progress">

@@ -1068,6 +1068,17 @@ h1, h2, h3 {
   z-index: 3;
 }
 
+.book-finished {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--success);
+}
+
 .book-favorite {
   position: absolute;
   bottom: 8px;
@@ -2463,6 +2474,12 @@ h1, h2, h3 {
   stroke-width: 3.4;
 }
 
+/* A shelf where every volume is finished: the ring goes green. */
+.shelf-card.ring-done .ring-fill,
+.goal-ring svg circle.met {
+  stroke: var(--success);
+}
+
 .ring-fill {
   fill: none;
   stroke: var(--accent);
@@ -2537,7 +2554,7 @@ h1, h2, h3 {
 /* ---------------- Reader notebook + highlight bar ---------------- */
 .reader-highlight-bar {
   position: absolute;
-  z-index: 70;
+  z-index: 90; /* above the notes drawer, which can be open while selecting */
   left: 50%;
   transform: translateX(-50%);
   bottom: 62px;

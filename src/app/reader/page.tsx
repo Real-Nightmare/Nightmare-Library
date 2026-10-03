@@ -48,6 +48,12 @@ function ReaderInner() {
     }
   }, [id]);
 
+  // Fetch any notes there already are once the book is known, so the notebook
+  // reflects the server from the first open instead of the first click.
+  useEffect(() => {
+    void loadNotes();
+  }, [loadNotes]);
+
   const viewerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const renditionRef = useRef<any>(null);
@@ -362,6 +368,21 @@ function ReaderInner() {
             setPageInfo(
               page && total && total > 1 ? `${page} / ${total}` : `${Math.round(percentRef.current)}%`
             );
+            // THE "STILL READING FOREVER" FIX. A book could only ever be
+            // finished by paging into the very last spread before the 30-second
+            // autosave fired; tapping through a chapter boundary, resuming near
+            // the end, or a short final chapter all left progress parked at
+            // 97-99%. Reaching the last page of the last section IS the end of
+            // the book, so finish it. A finished book then shows as Finished in
+            // the library, leaves "in progress", and its shelf ring goes green
+            // instead of haunting Continue Reading forever.
+            const endDisplayed = location.end?.displayed;
+            const atSectionEnd = !!endDisplayed && endDisplayed.total > 0 && endDisplayed.page >= endDisplayed.total;
+            const spineLen2 = epubRef.current?.spine?.length ?? 0;
+            const onLastSection = spineLen2 > 0 && (location.start.index ?? 0) >= spineLen2 - 1;
+            if ((percentRef.current >= 99.5 || onLastSection) && atSectionEnd) {
+              percentRef.current = 100;
+            }
             setHasPrev(percentRef.current > 0.5);
             setHasNext(percentRef.current < 99.5);
             if (location.start.href) setCurrentHref(location.start.href);
