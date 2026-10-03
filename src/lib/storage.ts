@@ -28,7 +28,7 @@ import { resolveSetting } from "./appsettings";
  * transparently. Video stays raw (incompressible) and streams with HTTP Range.
  */
 
-export type StorageProvider = "b2" | "b2_cascade" | "local";
+export type StorageProvider = "b2" | "b2_cascade" | "s3" | "pool" | "local";
 
 export interface StoredFile {
   provider: StorageProvider;
@@ -56,6 +56,21 @@ async function s3Config(): Promise<S3Config | null> {
   return { keyId, appKey, bucket, region };
 }
 
+/**
+ * Custom S3-compatible provider — Cloudflare R2, Storj, iDrive e2, Filebase,
+ * Tigris… anything that speaks the S3 API. Unlike B2 there is no daily
+ * download cap on R2 (zero egress fees), which is exactly why this exists.
+ */
+async function customS3Config(): Promise<S3Config | null> {
+  const endpoint = await resolveSetting("s3_endpoint");
+  const keyId = await resolveSetting("s3_key_id");
+  const appKey = await resolveSetting("s3_secret");
+  const bucket = await resolveSetting("s3_bucket");
+  if (!endpoint || !keyId || !appKey || !bucket) return null;
+  const region = (await resolveSetting("s3_region")) || "auto"; // R2 wants "auto"
+  return { keyId, appKey, bucket, region, endpoint };
+}
+
 async function cascadeConfig(): Promise<S3Config | null> {
   const endpoint = await resolveSetting("b2_cascade_endpoint");
   const keyId = await resolveSetting("b2_cascade_key_id");
@@ -66,6 +81,63 @@ async function cascadeConfig(): Promise<S3Config | null> {
   return { keyId, appKey, bucket, region, endpoint };
 }
 
+/**
+ * One configured S3 endpoint that can participate in the storage POOL.
+ * "b2_cascade" is reused as a fully generic second custom-S3 slot.
+ */
+export interface StorageSlot {
+  id: "b2" | "s3" | "b2_cascade";
+  label: string;
+  cfg: S3Config;
+  capacityBytes: number;
+}
+
+async function slotCapacityGb(id: "b2" | "s3" | "b2_cascade"): Promise<number> {
+  if (id === "b2") return 10; // B2 free tier
+  const raw = await resolveSetting(id === "s3" ? "s3_capacity_gb" : "b2_cascade_capacity_gb");
+  const v = Number(raw);
+  return Number.isFinite(v) && v > 0 ? v : id === "s3" ? 10 : 25;
+}
+
+/** Every S3-compatible slot that currently has credentials configured. */
+export async function storageSlots(): Promise<StorageSlot[]> {
+  const slots: StorageSlot[] = [];
+  const s3c = await customS3Config();
+  if (s3c) slots.push({ id: "s3", label: "Custom S3", cfg: s3c, capacityBytes: (await slotCapacityGb("s3")) * 1024 ** 3 });
+  const cas = await cascadeConfig();
+  if (cas) slots.push({ id: "b2_cascade", label: "Custom S3 #2", cfg: cas, capacityBytes: (await slotCapacityGb("b2_cascade")) * 1024 ** 3 });
+  const b2 = await s3Config();
+  if (b2) slots.push({ id: "b2", label: "Backblaze B2", cfg: b2, capacityBytes: (await slotCapacityGb("b2")) * 1024 ** 3 });
+  return slots;
+}
+
+/**
+ * POOL: pick the slot with the most free space left (capacity minus recorded
+ * usage). This is what makes several free-forever providers act as one big
+ * bucket — the sum of their free tiers is the pool's total storage.
+ */
+async function pickPoolSlot(): Promise<StorageSlot | null> {
+  const slots = await storageSlots();
+  if (slots.length === 0) return null;
+  let usage: Record<string, number> = {};
+  try {
+    const { providerUsage } = await import("./repo");
+    usage = await providerUsage();
+  } catch {
+    // usage unknown — treat all as empty
+  }
+  let best = slots[0];
+  let bestFree = -Infinity;
+  for (const s of slots) {
+    const free = s.capacityBytes - (usage[s.id] ?? 0);
+    if (free > bestFree) {
+      bestFree = free;
+      best = s;
+    }
+  }
+  return best;
+}
+
 function clientFor(cfg: S3Config): S3Client {
   return new S3Client({
     region: cfg.region,
@@ -74,11 +146,50 @@ function clientFor(cfg: S3Config): S3Client {
   });
 }
 
+/**
+ * Server-side write of a book payload to a specific configured slot. Used by
+ * saveBookFile/migration — bytes never touch the browser.
+ */
+export async function putObjectToSlot(
+  provider: "b2" | "s3" | "b2_cascade",
+  key: string,
+  data: Buffer
+): Promise<boolean> {
+  const slot = (await storageSlots()).find((s) => s.id === provider);
+  if (!slot) return false;
+  try {
+    await clientFor(slot.cfg).send(new PutObjectCommand({ Bucket: slot.cfg.bucket, Key: key, Body: data }));
+    return true;
+  } catch (error) {
+    console.error("putObjectToSlot failed:", error);
+    return false;
+  }
+}
+
 /** Which provider new uploads go to (settings override, else auto-detect). */
 export async function activeStorageProvider(): Promise<StorageProvider> {
   const { resolveStorageProvider } = await import("./appsettings");
   const p = await resolveStorageProvider();
   return p === "b2_cascade" ? "b2" : p; // cascade is a read/failover partner; uploads still target B2
+}
+
+/**
+ * Config for the ACTIVE upload target: the chosen pool slot when pooling,
+ * the custom S3 provider when selected, otherwise B2. Returns null when the
+ * chosen provider has no credentials — callers then fall back to local saves.
+ */
+export async function activeS3Config(): Promise<{ cfg: S3Config; provider: "b2" | "s3" | "b2_cascade" } | null> {
+  const active = await activeStorageProvider();
+  if (active === "s3") {
+    const cfg = await customS3Config();
+    return cfg ? { cfg, provider: "s3" } : null;
+  }
+  if (active === "pool") {
+    const slot = await pickPoolSlot();
+    return slot ? { cfg: slot.cfg, provider: slot.id } : null;
+  }
+  const cfg = await s3Config();
+  return cfg ? { cfg, provider: "b2" } : null;
 }
 
 // ---------------- Compression helpers ----------------
@@ -121,27 +232,27 @@ export function bookObjectKey(bookId: string, fileType: string): string {
   return `books/${bookId}.${fileType}`;
 }
 
-/** Presigned PUT for the browser to upload directly to B2. */
+/** Presigned PUT for the browser to upload directly to the active S3 provider. */
 export async function createPresignedUpload(
   bookId: string,
   fileType: string,
   contentType: string
 ): Promise<{ uploadUrl: string; storageId: string; provider: StorageProvider } | null> {
-  const cfg = await s3Config();
-  if (!cfg) return null;
+  const active = await activeS3Config();
+  if (!active) return null;
   const key = bookObjectKey(bookId, fileType);
-  const command = new PutObjectCommand({ Bucket: cfg.bucket, Key: key, ContentType: contentType });
-  const uploadUrl = await getSignedUrl(clientFor(cfg), command, { expiresIn: 900 });
-  return { uploadUrl, storageId: key, provider: "b2" };
+  const command = new PutObjectCommand({ Bucket: active.cfg.bucket, Key: key, ContentType: contentType });
+  const uploadUrl = await getSignedUrl(clientFor(active.cfg), command, { expiresIn: 900 });
+  return { uploadUrl, storageId: key, provider: active.provider };
 }
 
-/** Verifies a file landed in B2 after a presigned upload (stored/compressed size). */
+/** Verifies a file landed in the active S3 provider after a presigned upload. */
 export async function verifyUpload(storageId: string): Promise<number | null> {
-  const cfg = await s3Config();
-  if (!cfg) return null;
+  const active = await activeS3Config();
+  if (!active) return null;
   try {
-    const res = await clientFor(cfg).send(
-      new HeadObjectCommand({ Bucket: cfg.bucket, Key: storageId })
+    const res = await clientFor(active.cfg).send(
+      new HeadObjectCommand({ Bucket: active.cfg.bucket, Key: storageId })
     );
     return res.ContentLength ?? null;
   } catch {
@@ -149,12 +260,27 @@ export async function verifyUpload(storageId: string): Promise<number | null> {
   }
 }
 
-/** Server-side save for the local provider (writes the payload as-is). */
+/**
+ * Server-side save to the ACTIVE provider — custom S3, the pool's freest
+ * slot, or B2 — falling back to local disk when none is usable. Used by the
+ * upload fallback path AND the migration, so both always honor the user's
+ * provider choice.
+ */
 export async function saveBookFile(
   bookId: string,
   fileType: string,
   payload: Buffer
 ): Promise<StoredFile> {
+  const active = await activeStorageProvider();
+  if (active === "s3" || active === "pool" || active === "b2") {
+    const target = await activeS3Config();
+    if (target) {
+      const key = bookObjectKey(bookId, fileType);
+      if (await putObjectToSlot(target.provider, key, payload)) {
+        return { provider: target.provider, storageId: key };
+      }
+    }
+  }
   const filename = `${bookId}.${fileType}`;
   await mkdir(BOOKS_DIR, { recursive: true });
   await writeFile(path.join(BOOKS_DIR, filename), payload);
@@ -174,6 +300,14 @@ export async function readBookFileDecoded(
   encoding: string | null | undefined
 ): Promise<Buffer | null> {
   try {
+    if (provider === "s3") {
+      const cfg = await customS3Config();
+      if (!cfg) return null;
+      const res = await clientFor(cfg).send(
+        new GetObjectCommand({ Bucket: cfg.bucket, Key: storageId })
+      );
+      return tryDecompress(await streamToBuffer(res.Body), encoding);
+    }
     if (provider === "b2" || provider === "b2_cascade") {
       const primary = await s3Config();
       const secondary = await cascadeConfig();
@@ -206,6 +340,17 @@ export async function deleteBookFile(
   storageId: string
 ): Promise<void> {
   try {
+    if (provider === "s3") {
+      const cfg = await customS3Config();
+      if (cfg) {
+        try {
+          await clientFor(cfg).send(new DeleteObjectCommand({ Bucket: cfg.bucket, Key: storageId }));
+        } catch {
+          // ignore
+        }
+      }
+      return;
+    }
     if (provider === "b2" || provider === "b2_cascade") {
       const primary = await s3Config();
       const secondary = await cascadeConfig();
@@ -241,50 +386,71 @@ export async function deleteBookFile(
 // The serverless filesystem is EPHEMERAL — local-only covers vanish between
 // instances/deployments, which is why covers 404'd in production.
 
-/** Put a small object (e.g. cover) into B2. Returns the storage key, or null when B2 is unavailable. */
+/** Put a small object (e.g. cover) into the active S3 provider. Returns the storage key, or null when no provider is available. */
 export async function putSmallObject(
   key: string,
   data: Buffer,
   contentType: string
 ): Promise<string | null> {
-  try {
-    const cfg = await s3Config();
-    if (!cfg) return null;
-    await clientFor(cfg).send(
-      new PutObjectCommand({ Bucket: cfg.bucket, Key: key, Body: data, ContentType: contentType })
-    );
-    return key;
-  } catch (error) {
-    console.error("putSmallObject failed:", error);
-    return null;
-  }
-}
-
-/** Read a small object from B2 (null when missing or B2 unavailable). */
-export async function getSmallObject(key: string): Promise<Buffer | null> {
-  try {
-    const cfg = await s3Config();
-    if (!cfg) return null;
-    const res = await clientFor(cfg).send(
-      new GetObjectCommand({ Bucket: cfg.bucket, Key: key })
-    );
-    return await streamToBuffer(res.Body);
-  } catch (error) {
-    if ((error as { name?: string })?.name !== "NoSuchKey") {
-      console.error("getSmallObject failed:", error);
+  // Try the active provider first, then B2 — covers are tiny and a fallback
+  // write keeps covers working while providers are being swapped over.
+  const candidates: S3Config[] = [];
+  const active = await activeS3Config();
+  if (active) candidates.push(active.cfg);
+  const b2 = await s3Config();
+  if (b2 && !candidates.some((c) => c.bucket === b2.bucket && c.endpoint === b2.endpoint)) candidates.push(b2);
+  for (const cfg of candidates) {
+    try {
+      await clientFor(cfg).send(
+        new PutObjectCommand({ Bucket: cfg.bucket, Key: key, Body: data, ContentType: contentType })
+      );
+      return key;
+    } catch (error) {
+      console.error("putSmallObject failed:", error);
     }
-    return null;
   }
+  return null;
 }
 
-/** Delete a small object from B2 (best-effort). */
+/** Read a small object from the active provider, then cascade, then B2 (null when missing everywhere). */
+export async function getSmallObject(key: string): Promise<Buffer | null> {
+  const candidates: S3Config[] = [];
+  const active = await activeS3Config();
+  if (active) candidates.push(active.cfg);
+  const cascade = await cascadeConfig();
+  if (cascade) candidates.push(cascade);
+  const b2 = await s3Config();
+  if (b2) candidates.push(b2);
+  for (const cfg of candidates) {
+    try {
+      const res = await clientFor(cfg).send(
+        new GetObjectCommand({ Bucket: cfg.bucket, Key: key })
+      );
+      return await streamToBuffer(res.Body);
+    } catch (error) {
+      if ((error as { name?: string })?.name !== "NoSuchKey" && (error as { name?: string })?.name !== "NotFound") {
+        console.error("getSmallObject failed:", error);
+      }
+    }
+  }
+  return null;
+}
+
+/** Delete a small object from every configured provider (best-effort). */
 export async function deleteSmallObject(key: string): Promise<void> {
-  try {
-    const cfg = await s3Config();
-    if (!cfg) return;
-    await clientFor(cfg).send(new DeleteObjectCommand({ Bucket: cfg.bucket, Key: key }));
-  } catch {
-    // best-effort
+  const candidates: S3Config[] = [];
+  const active = await activeS3Config();
+  if (active) candidates.push(active.cfg);
+  const cascade = await cascadeConfig();
+  if (cascade) candidates.push(cascade);
+  const b2 = await s3Config();
+  if (b2) candidates.push(b2);
+  for (const cfg of candidates) {
+    try {
+      await clientFor(cfg).send(new DeleteObjectCommand({ Bucket: cfg.bucket, Key: key }));
+    } catch {
+      // best-effort
+    }
   }
 }
 
@@ -339,6 +505,18 @@ export async function openMediaStream(
   rangeHeader: string | null
 ): Promise<MediaRange | null> {
   try {
+    if (provider === "s3") {
+      const cfg = await customS3Config();
+      if (!cfg) return null;
+      const res = await clientFor(cfg).send(
+        new GetObjectCommand({
+          Bucket: cfg.bucket,
+          Key: storageId,
+          ...(rangeHeader ? { Range: rangeHeader } : {}),
+        })
+      );
+      return rangeResult(res.Body as Readable, res.ContentLength ?? null, rangeHeader);
+    }
     if (provider === "b2" || provider === "b2_cascade") {
       const primary = await s3Config();
       const secondary = await cascadeConfig();

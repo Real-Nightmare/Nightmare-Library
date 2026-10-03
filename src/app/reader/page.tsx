@@ -299,7 +299,11 @@ function ReaderInner() {
         const initialPercent = Number(savedData.progress?.percent ?? 0);
 
         const fileRes = await fetch(`/api/books/${id}/file`);
-        if (!fileRes.ok) throw new Error("Failed to load book file");
+        if (!fileRes.ok) {
+          throw new Error(
+            "The book file could not be fetched from storage. If your storage provider enforces a daily download cap (Backblaze B2: 1 GB/day, resets midnight UTC), it is exhausted — try again after the reset, or switch providers in Settings → File Storage."
+          );
+        }
 
         if (data.book.file_type === "epub") {
           const ePub = (await import("epubjs")).default;

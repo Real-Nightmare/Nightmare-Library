@@ -44,7 +44,7 @@ export const SETTING_KEYS: SettingKeyDef[] = [
 
   // ---------- Storage ----------
   { key: "storage_provider", group: "storage", label: "Storage provider", secret: false, env: "",
-    hint: "b2 = Backblaze B2 (10GB free), b2_cascade = B2 + automatic second-provider failover, local = server disk" },
+    hint: "pool = spread books across EVERY configured provider (sums their free tiers — recommended), s3 = one custom S3 provider (R2, iDrive e2, Filebase…), b2 = Backblaze B2, b2_cascade = B2 + failover, local = server disk" },
   { key: "b2_key_id", group: "storage", label: "B2 key ID", secret: true, env: "B2_KEY_ID" },
   { key: "b2_application_key", group: "storage", label: "B2 application key", secret: true, env: "B2_APPLICATION_KEY" },
   { key: "b2_bucket", group: "storage", label: "B2 bucket name", secret: false, env: "B2_BUCKET_NAME" },
@@ -55,6 +55,18 @@ export const SETTING_KEYS: SettingKeyDef[] = [
   { key: "b2_cascade_secret", group: "storage", label: "Cascade secret", secret: true, env: "B2_CASCADE_SECRET" },
   { key: "b2_cascade_bucket", group: "storage", label: "Cascade bucket", secret: false, env: "B2_CASCADE_BUCKET" },
   { key: "b2_cascade_region", group: "storage", label: "Cascade region", secret: false, env: "B2_CASCADE_REGION", placeholder: "us-east-1" },
+  { key: "b2_cascade_capacity_gb", group: "storage", label: "Custom S3 #2 capacity (GB)", secret: false, env: "B2_CASCADE_CAPACITY_GB",
+    hint: "Pool budget for the second custom S3 slot. Default 25 (e.g. Storj-class free tier)." },
+
+  { key: "s3_endpoint", group: "storage", label: "Custom S3 endpoint", secret: false, env: "S3_ENDPOINT",
+    placeholder: "https://<account>.r2.cloudflarestorage.com",
+    hint: "Full endpoint URL of any S3-compatible provider — Cloudflare R2, Storj, iDrive e2, Filebase, Tigris…" },
+  { key: "s3_region", group: "storage", label: "Custom S3 region", secret: false, env: "S3_REGION", placeholder: "auto" },
+  { key: "s3_key_id", group: "storage", label: "Custom S3 access key ID", secret: true, env: "S3_ACCESS_KEY_ID" },
+  { key: "s3_secret", group: "storage", label: "Custom S3 secret key", secret: true, env: "S3_SECRET_ACCESS_KEY" },
+  { key: "s3_bucket", group: "storage", label: "Custom S3 bucket", secret: false, env: "S3_BUCKET" },
+  { key: "s3_capacity_gb", group: "storage", label: "Custom S3 capacity (GB)", secret: false, env: "S3_CAPACITY_GB",
+    hint: "Pool budget for this slot — how much of the provider's free tier to use. Default 10 (R2/iDrive e2 free tier)." },
 
   // ---------- Password ----------
   { key: "site_password", group: "password", label: "Site password", secret: true, env: "PASSWORD",
@@ -216,16 +228,22 @@ export async function resolveDatabaseProvider(): Promise<"supabase" | "turso" | 
   return tUrl ? "turso" : "local";
 }
 
-export type StorageProviderId = "b2" | "b2_cascade" | "local";
+export type StorageProviderId = "b2" | "b2_cascade" | "s3" | "pool" | "local";
 
 export async function resolveStorageProvider(): Promise<StorageProviderId> {
   const p = await resolveSetting("storage_provider");
-  if (p === "b2" || p === "b2_cascade" || p === "local") return p;
+  if (p === "b2" || p === "b2_cascade" || p === "s3" || p === "pool" || p === "local") return p;
   const map = await cachedMap();
   const keyId = map["b2_key_id"]?.trim() || process.env.B2_KEY_ID?.trim();
   const appKey = map["b2_application_key"]?.trim() || process.env.B2_APPLICATION_KEY?.trim();
   const bucket = map["b2_bucket"]?.trim() || process.env.B2_BUCKET_NAME?.trim();
-  return keyId && appKey && bucket ? "b2" : "local";
+  if (keyId && appKey && bucket) return "b2";
+  // No B2 creds — a custom S3 endpoint (R2 etc.) or local disk.
+  const s3Key = map["s3_key_id"]?.trim() || process.env.S3_ACCESS_KEY_ID?.trim();
+  const s3Secret = map["s3_secret"]?.trim() || process.env.S3_SECRET_ACCESS_KEY?.trim();
+  const s3Bucket = map["s3_bucket"]?.trim() || process.env.S3_BUCKET?.trim();
+  const s3Endpoint = map["s3_endpoint"]?.trim() || process.env.S3_ENDPOINT?.trim();
+  return s3Key && s3Secret && s3Bucket && s3Endpoint ? "s3" : "local";
 }
 
 /** Effective site password: runtime override → PASSWORD env. */

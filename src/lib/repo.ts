@@ -185,7 +185,15 @@ export async function deleteBookRow(id: string): Promise<void> {
 
 export async function updateBook(
   id: string,
-  fields: { title?: string; author?: string; tags?: string; is_favorite?: boolean; media_type?: string }
+  fields: {
+    title?: string;
+    author?: string;
+    tags?: string;
+    is_favorite?: boolean;
+    media_type?: string;
+    storage_provider?: string;
+    storage_id?: string;
+  }
 ): Promise<void> {
   if (Object.keys(fields).length === 0) return;
 
@@ -204,8 +212,35 @@ export async function updateBook(
   if (fields.tags !== undefined) { sets.push("tags = ?"); args.push(fields.tags); }
   if (fields.is_favorite !== undefined) { sets.push("is_favorite = ?"); args.push(fields.is_favorite ? 1 : 0); }
   if (fields.media_type !== undefined) { sets.push("media_type = ?"); args.push(fields.media_type); }
+  if (fields.storage_provider !== undefined) { sets.push("storage_provider = ?"); args.push(fields.storage_provider); }
+  if (fields.storage_id !== undefined) { sets.push("storage_id = ?"); args.push(fields.storage_id); }
   args.push(id);
   await (await sql()).execute({ sql: `UPDATE books SET ${sets.join(", ")} WHERE id = ?`, args });
+}
+
+/**
+ * Stored bytes per storage provider (from the books table) — the pool uses
+ * this to decide which provider still has free space.
+ */
+export async function providerUsage(): Promise<Record<string, number>> {
+  const map: Record<string, number> = {};
+  if (await isSupabaseConfigured()) {
+    const sb = await getSupabase();
+    const { data, error } = await sb.from("books").select("storage_provider, file_size");
+    if (error) return map;
+    for (const row of (data || []) as { storage_provider: string | null; file_size: number | null }[]) {
+      if (row.storage_provider) map[row.storage_provider] = (map[row.storage_provider] ?? 0) + (row.file_size ?? 0);
+    }
+    return map;
+  }
+  await ensureMigrated();
+  const res = await (
+    await sql()
+  ).execute("SELECT storage_provider, SUM(file_size) as total FROM books GROUP BY storage_provider");
+  for (const row of res.rows as unknown as { storage_provider: string | null; total: number | string | null }[]) {
+    if (row.storage_provider) map[row.storage_provider] = Number(row.total ?? 0);
+  }
+  return map;
 }
 
 export async function getBookStorage(id: string): Promise<{

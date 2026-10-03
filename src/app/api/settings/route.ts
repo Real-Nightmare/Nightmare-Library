@@ -11,15 +11,21 @@ import {
 
 export const runtime = "nodejs";
 
-/** GET /api/settings — masked settings for the Settings page. */
+/** GET /api/settings — masked settings + per-provider usage for the Settings page. */
 export async function GET() {
   try {
-    const [settings, dbProvider, storageProvider] = await Promise.all([
+    const [settings, dbProvider, storageProvider, usage] = await Promise.all([
       listSettings(),
       resolveDatabaseProvider(),
       resolveStorageProvider(),
+      import("@/lib/repo").then((m) => m.providerUsage()),
     ]);
-    return NextResponse.json({ success: true, settings, active: { db: dbProvider, storage: storageProvider } });
+    return NextResponse.json({
+      success: true,
+      settings,
+      active: { db: dbProvider, storage: storageProvider },
+      usage,
+    });
   } catch (error) {
     console.error("Settings load error:", error);
     return NextResponse.json({ success: false, message: "Failed to load settings" }, { status: 500 });
@@ -98,6 +104,32 @@ export async function PUT(req: NextRequest) {
         } catch (err) {
           return NextResponse.json(
             { success: false, message: `B2 connection failed: ${err instanceof Error ? err.message : "unreachable"}` },
+            { status: 400 }
+          );
+        }
+      }
+    }
+
+    // ---- Custom S3-compatible provider connectivity test (R2, Storj, iDrive e2…) ----
+    if (["storage_provider", "s3_endpoint", "s3_region", "s3_key_id", "s3_secret", "s3_bucket"].some((k) => k in patch)) {
+      const merged = await mergeForTest(patch);
+      const endpoint = merged["s3_endpoint"] || process.env.S3_ENDPOINT;
+      const keyId = merged["s3_key_id"] || process.env.S3_ACCESS_KEY_ID;
+      const appKey = merged["s3_secret"] || process.env.S3_SECRET_ACCESS_KEY;
+      const bucket = merged["s3_bucket"] || process.env.S3_BUCKET;
+      const region = merged["s3_region"] || process.env.S3_REGION || "auto";
+      if (endpoint?.trim() && keyId?.trim() && appKey?.trim() && bucket?.trim()) {
+        try {
+          const { S3Client, HeadBucketCommand } = await import("@aws-sdk/client-s3");
+          const probe = new S3Client({
+            region,
+            endpoint: endpoint.trim(),
+            credentials: { accessKeyId: keyId.trim(), secretAccessKey: appKey.trim() },
+          });
+          await probe.send(new HeadBucketCommand({ Bucket: bucket.trim() }));
+        } catch (err) {
+          return NextResponse.json(
+            { success: false, message: `Custom S3 connection failed: ${err instanceof Error ? err.message : "unreachable"}` },
             { status: 400 }
           );
         }

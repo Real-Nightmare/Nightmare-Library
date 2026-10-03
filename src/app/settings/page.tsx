@@ -18,7 +18,7 @@ type SettingsMap = Record<string, SettingView>;
 
 const GROUPS: { id: "database" | "storage" | "password"; title: string; icon: string; blurb: string }[] = [
   { id: "database", title: "Database", icon: "🗄️", blurb: "Where your library metadata, progress and shelves live." },
-  { id: "storage", title: "File Storage", icon: "💾", blurb: "Where EPUBs, PDFs and videos are stored. B2 gives 10GB free; cascade adds automatic failover to a second S3-compatible provider." },
+  { id: "storage", title: "File Storage", icon: "💾", blurb: "Pool mode spreads books across EVERY configured provider — fill Custom S3 (Cloudflare R2: 10GB, no download caps) and Custom S3 #2 to stack free tiers toward 100GB+. B2 alone caps downloads at 1GB/day." },
   { id: "password", title: "Site Password", icon: "🔒", blurb: "Change the password used to enter the library. Changing it signs out every device." },
 ];
 
@@ -26,6 +26,7 @@ export default function SettingsPage() {
   const router = useRouter();
   const [settings, setSettings] = useState<SettingsMap | null>(null);
   const [active, setActive] = useState<{ db: string; storage: string } | null>(null);
+  const [usage, setUsage] = useState<Record<string, number> | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<string | null>(null);
   const [message, setMessage] = useState<{ group: string; ok: boolean; text: string } | null>(null);
@@ -34,6 +35,7 @@ export default function SettingsPage() {
   const [currentPw, setCurrentPw] = useState("");
   const [nextPw, setNextPw] = useState("");
   const [confirmPw, setConfirmPw] = useState("");
+  const [migrating, setMigrating] = useState(false);
 
   const load = useCallback(async () => {
     const res = await fetch("/api/settings");
@@ -47,6 +49,7 @@ export default function SettingsPage() {
       for (const s of data.settings as SettingView[]) map[s.key] = s;
       setSettings(map);
       setActive(data.active);
+      setUsage((data.usage as Record<string, number>) ?? null);
     }
   }, [router]);
 
@@ -96,6 +99,27 @@ export default function SettingsPage() {
       setMessage({ group, ok: false, text: "Save failed — network error" });
     } finally {
       setSaving(null);
+    }
+  };
+
+  const migrateFromB2 = async () => {
+    setMigrating(true);
+    setMessage({ group: "storage", ok: true, text: "Moving books — this reads and re-uploads every B2 file and can take a while…" });
+    try {
+      const res = await fetch("/api/settings/migrate", { method: "POST" });
+      const data = await res.json();
+      if (data.success) {
+        const bits = [`moved: ${data.migrated}`, `failed: ${data.failed}`, `skipped (already elsewhere): ${data.skipped}`];
+        const fails = Array.isArray(data.failures) && data.failures.length > 0 ? ` — ${data.failures.join("; ")}` : "";
+        setMessage({ group: "storage", ok: data.failed === 0, text: `Done (${bits.join(", ")})${fails}` });
+        await load();
+      } else {
+        setMessage({ group: "storage", ok: false, text: data.message || "Migration failed" });
+      }
+    } catch {
+      setMessage({ group: "storage", ok: false, text: "Migration failed — network error" });
+    } finally {
+      setMigrating(false);
     }
   };
 
@@ -158,6 +182,8 @@ export default function SettingsPage() {
             )}
             {key === "storage_provider" && (
               <>
+                <option value="pool">Pool — spread across every configured provider</option>
+                <option value="s3">Custom S3 (R2, iDrive e2, Filebase…)</option>
                 <option value="b2">Backblaze B2</option>
                 <option value="b2_cascade">B2 + cascade failover</option>
                 <option value="local">Server disk (local)</option>
@@ -226,6 +252,21 @@ export default function SettingsPage() {
               </>
             )}
 
+            {g.id === "storage" && settings && usage && (
+              <div className="form-group">
+                <label>Storage usage (pool budget vs. stored bytes)</label>
+                {Object.keys(usage).length === 0 ? (
+                  <p className="settings-hint">No files stored yet.</p>
+                ) : (
+                  <p className="settings-hint">
+                    {Object.entries(usage)
+                      .map(([p, bytes]) => `${p}: ${(bytes / 1024 ** 3).toFixed(2)} GB`)
+                      .join(" · ")}
+                  </p>
+                )}
+              </div>
+            )}
+
             {g.id === "storage" && settings && (
               <>
                 {field("storage_provider")}
@@ -234,15 +275,34 @@ export default function SettingsPage() {
                 {field("b2_bucket")}
                 {field("b2_region")}
                 <div className="settings-divider" />
-                <h3 className="settings-sub">Cascade failover (optional second provider)</h3>
+                <h3 className="settings-sub">Custom S3-compatible provider — no download caps</h3>
+                {field("s3_endpoint")}
+                {field("s3_key_id")}
+                {field("s3_secret")}
+                {field("s3_bucket")}
+                {field("s3_region")}
+                {field("s3_capacity_gb")}
+                <div className="settings-divider" />
+                <h3 className="settings-sub">Custom S3 #2 (second pool slot / failover)</h3>
                 {field("b2_cascade_endpoint")}
                 {field("b2_cascade_key_id")}
                 {field("b2_cascade_secret")}
                 {field("b2_cascade_bucket")}
                 {field("b2_cascade_region")}
+                {field("b2_cascade_capacity_gb")}
                 <button className="btn-primary" disabled={saving === "storage"} onClick={() => saveGroup("storage")}>
                   {saving === "storage" ? "Testing & saving..." : "Save storage settings"}
                 </button>
+                <div className="settings-divider" />
+                <h3 className="settings-sub">Move books off B2</h3>
+                <button className="btn-primary" disabled={migrating} onClick={migrateFromB2}>
+                  {migrating ? "Moving books…" : "Move all books from B2 → current provider"}
+                </button>
+                <p className="settings-hint">
+                  Copies every B2-stored book to the active provider (Custom S3 or local disk), server-side, and keeps
+                  the B2 copies as a backup. If B2's daily download cap (1GB/day, resets midnight UTC) is exhausted,
+                  some books will fail — re-run this after the reset.
+                </p>
               </>
             )}
 
