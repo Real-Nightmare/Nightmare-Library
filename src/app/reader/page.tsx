@@ -212,7 +212,13 @@ function ReaderInner() {
             // displayed.total is the real per-section page count; the old code
             // printed end-spread's page number here ("2 / 2" garbage).
             const total = location.start.displayed?.total;
-            setPageInfo(page ? `${page} / ${total || "?"}` : `${Math.round(percentRef.current)}%`);
+            // "1 / 1" is noise: it is what epub.js reports for the very first
+            // render, before locations.generate() has laid the book out, and it
+            // makes a phone reader look stuck. Show the percentage until the
+            // real page count is known.
+            setPageInfo(
+              page && total && total > 1 ? `${page} / ${total}` : `${Math.round(percentRef.current)}%`
+            );
             setHasPrev(percentRef.current > 0.5);
             setHasNext(percentRef.current < 99.5);
             if (location.start.href) setCurrentHref(location.start.href);
@@ -467,13 +473,13 @@ function ReaderInner() {
             A+
           </button>
           {isEpub && (
-            <button className="btn-icon desk-only" onClick={() => { setTypeOpen((v) => !v); setTocOpen(false); }} title="Reading type" aria-label="Reading type">
+            <button className="btn-icon desk-only keep-touch" onClick={() => { setTypeOpen((v) => !v); setTocOpen(false); }} title="Reading type" aria-label="Reading type">
               Aa
             </button>
           )}
           {isEpub && (
             <button
-              className={`btn-icon desk-only ${tocOpen ? "active" : ""}`}
+              className={`btn-icon desk-only keep-touch ${tocOpen ? "active" : ""}`}
               onClick={() => { setTocOpen((v) => !v); setTypeOpen(false); }}
               title="Contents (T)"
               aria-label="Contents"

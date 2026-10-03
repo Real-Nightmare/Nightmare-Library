@@ -2014,8 +2014,19 @@ h1, h2, h3 {
     display: none;
   }
 
+  /* Chapters and typography are not "desktop" features — a phone reader with
+     no way to jump a chapter or change the type is the odd one out. Keep these
+     two; the font-size/theme/fullscreen buttons stay out of the way. */
+  .toolbar-right .btn-icon.desk-only.keep-touch {
+    display: inline-flex;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    font-size: 13px;
+  }
+
   .book-title-bar {
-    max-width: 110px;
+    max-width: 92px;
   }
 
   .settings-main {
