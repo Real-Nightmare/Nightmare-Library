@@ -18,6 +18,7 @@ import { resolveSetting } from "./appsettings";
  * Providers (Settings page, env fallback):
  * - b2         : Backblaze B2 (10GB free) via S3-compatible API
  * - b2_cascade : B2 with automatic failover to a second S3-compatible provider
+ * - webdav/webdav2 : generic WebDAV (Koofr 10GB, pCloud 10GB — free forever, no card)
  * - local      : server disk .data/books/ (zero-config dev/self-host)
  *
  * COMPRESSION: book files (EPUB/PDF) are gzip-compressed CLIENT-SIDE before
@@ -28,7 +29,7 @@ import { resolveSetting } from "./appsettings";
  * transparently. Video stays raw (incompressible) and streams with HTTP Range.
  */
 
-export type StorageProvider = "b2" | "b2_cascade" | "s3" | "pool" | "local";
+export type StorageProvider = "b2" | "b2_cascade" | "s3" | "pool" | "local" | "webdav" | "webdav2";
 
 export interface StoredFile {
   provider: StorageProvider;
@@ -82,6 +83,110 @@ async function cascadeConfig(): Promise<S3Config | null> {
 }
 
 /**
+ * Generic WebDAV slot — the cheapest way to add free-forever capacity with NO
+ * credit card: Koofr (10GB, app.koofr.net/dav/Koofr) and pCloud
+ * (webdav.pcloud.com) both expose plain WebDAV on their free tiers. One
+ * adapter covers any provider that speaks the protocol.
+ */
+interface WebDavConfig {
+  endpoint: string;
+  username: string;
+  password: string;
+  basePath: string;
+}
+
+export type WebDavSlotId = "webdav" | "webdav2";
+
+async function webdavConfig(slot: WebDavSlotId): Promise<WebDavConfig | null> {
+  const p = slot === "webdav" ? "webdav" : "webdav2";
+  const endpoint = await resolveSetting(`${p}_endpoint`);
+  const username = await resolveSetting(`${p}_username`);
+  const password = await resolveSetting(`${p}_password`);
+  if (!endpoint || !username || !password) return null;
+  const raw = (await resolveSetting(`${p}_base_path`)) || "/nightmare-library";
+  const bp = raw.startsWith("/") ? raw : `/${raw}`;
+  return { endpoint: endpoint.replace(/\/+$/, ""), username, password, basePath: bp.replace(/\/+$/, "") };
+}
+
+function webdavAuth(wd: WebDavConfig): string {
+  return `Basic ${Buffer.from(`${wd.username}:${wd.password}`).toString("base64")}`;
+}
+
+function webdavUrl(wd: WebDavConfig, relPath: string): string {
+  return `${wd.endpoint}${wd.basePath}/${relPath.replace(/^\/+/, "")}`;
+}
+
+/** PUT with automatic MKCOL of missing parent folders (WebDAV has no mkdir -p). */
+async function webdavPut(wd: WebDavConfig, relPath: string, data: Buffer): Promise<boolean> {
+  const url = webdavUrl(wd, relPath);
+  const headers = { Authorization: webdavAuth(wd), "Content-Type": "application/octet-stream" };
+  const body = () => new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  let res = await fetch(url, { method: "PUT", headers, body: body() as unknown as BodyInit });
+  if (res.status === 409 || res.status === 404) {
+    try {
+      const u = new URL(url);
+      const segs = u.pathname.split("/").filter(Boolean);
+      let prefix = "";
+      for (let i = 0; i < segs.length - 1; i++) {
+        prefix += `/${segs[i]}`;
+        await fetch(`${u.origin}${prefix}`, { method: "MKCOL", headers: { Authorization: webdavAuth(wd) } }).catch(() => undefined);
+      }
+      res = await fetch(url, { method: "PUT", headers, body: body() as unknown as BodyInit });
+    } catch {
+      return false;
+    }
+  }
+  return res.ok;
+}
+
+async function webdavGet(wd: WebDavConfig, relPath: string): Promise<Buffer> {
+  const res = await fetch(webdavUrl(wd, relPath), { headers: { Authorization: webdavAuth(wd) } });
+  if (!res.ok) throw new Error(`WebDAV GET failed: HTTP ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+async function webdavDelete(wd: WebDavConfig, relPath: string): Promise<void> {
+  try {
+    await fetch(webdavUrl(wd, relPath), { method: "DELETE", headers: { Authorization: webdavAuth(wd) } });
+  } catch {
+    // already gone — fine
+  }
+}
+
+/** Connectivity probe for the Settings save path. Returns an error string or null. */
+export async function webdavTest(wd: WebDavConfig): Promise<string | null> {
+  try {
+    const res = await fetch(`${wd.endpoint}/`, { method: "OPTIONS", headers: { Authorization: webdavAuth(wd) } });
+    if (res.status === 401 || res.status === 403) return "authentication failed — check username and (app) password";
+    if (!res.ok && res.status !== 405) return `HTTP ${res.status}`;
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : "unreachable";
+  }
+}
+
+export interface WebDavSlot {
+  id: WebDavSlotId;
+  label: string;
+  wd: WebDavConfig;
+  capacityBytes: number;
+}
+
+/** Every configured WebDAV slot (Koofr, pCloud, Nextcloud, …). */
+export async function webdavSlots(): Promise<WebDavSlot[]> {
+  const slots: WebDavSlot[] = [];
+  for (const id of ["webdav", "webdav2"] as WebDavSlotId[]) {
+    const wd = await webdavConfig(id);
+    if (!wd) continue;
+    const raw = await resolveSetting(`${id}_capacity_gb`);
+    const v = Number(raw);
+    const gb = Number.isFinite(v) && v > 0 ? v : 10;
+    slots.push({ id, label: id === "webdav" ? "WebDAV" : "WebDAV #2", wd, capacityBytes: gb * 1024 ** 3 });
+  }
+  return slots;
+}
+
+/**
  * One configured S3 endpoint that can participate in the storage POOL.
  * "b2_cascade" is reused as a fully generic second custom-S3 slot.
  */
@@ -111,14 +216,18 @@ export async function storageSlots(): Promise<StorageSlot[]> {
   return slots;
 }
 
+type PoolPick = { id: "b2" | "s3" | "b2_cascade"; cfg: S3Config } | { id: WebDavSlotId; wd: WebDavConfig };
+
 /**
  * POOL: pick the slot with the most free space left (capacity minus recorded
- * usage). This is what makes several free-forever providers act as one big
- * bucket — the sum of their free tiers is the pool's total storage.
+ * usage) across S3-compatible AND WebDAV slots. This is what makes several
+ * free-forever providers act as one big bucket — the sum of their free tiers
+ * is the pool's total storage.
  */
-async function pickPoolSlot(): Promise<StorageSlot | null> {
-  const slots = await storageSlots();
-  if (slots.length === 0) return null;
+async function pickPoolSlot(): Promise<PoolPick | null> {
+  const s3 = await storageSlots();
+  const wds = await webdavSlots();
+  if (s3.length === 0 && wds.length === 0) return null;
   let usage: Record<string, number> = {};
   try {
     const { providerUsage } = await import("./repo");
@@ -126,13 +235,21 @@ async function pickPoolSlot(): Promise<StorageSlot | null> {
   } catch {
     // usage unknown — treat all as empty
   }
-  let best = slots[0];
+  const candidates: PoolPick[] = [
+    ...s3.map((s) => ({ id: s.id, cfg: s.cfg } as PoolPick)),
+    ...wds.map((s) => ({ id: s.id, wd: s.wd } as PoolPick)),
+  ];
+  let best = candidates[0];
   let bestFree = -Infinity;
-  for (const s of slots) {
-    const free = s.capacityBytes - (usage[s.id] ?? 0);
+  for (const c of candidates) {
+    const cap =
+      "cfg" in c
+        ? (s3.find((s) => s.id === c.id)?.capacityBytes ?? 0)
+        : (wds.find((s) => s.id === c.id)?.capacityBytes ?? 0);
+    const free = cap - (usage[c.id] ?? 0);
     if (free > bestFree) {
       bestFree = free;
-      best = s;
+      best = c;
     }
   }
   return best;
@@ -151,13 +268,18 @@ function clientFor(cfg: S3Config): S3Client {
  * saveBookFile/migration — bytes never touch the browser.
  */
 export async function putObjectToSlot(
-  provider: "b2" | "s3" | "b2_cascade",
+  provider: "b2" | "s3" | "b2_cascade" | WebDavSlotId,
   key: string,
   data: Buffer
 ): Promise<boolean> {
-  const slot = (await storageSlots()).find((s) => s.id === provider);
-  if (!slot) return false;
   try {
+    if (provider === "webdav" || provider === "webdav2") {
+      const wd = await webdavConfig(provider);
+      if (!wd) return false;
+      return await webdavPut(wd, key, data);
+    }
+    const slot = (await storageSlots()).find((s) => s.id === provider);
+    if (!slot) return false;
     await clientFor(slot.cfg).send(new PutObjectCommand({ Bucket: slot.cfg.bucket, Key: key, Body: data }));
     return true;
   } catch (error) {
@@ -186,7 +308,9 @@ export async function activeS3Config(): Promise<{ cfg: S3Config; provider: "b2" 
   }
   if (active === "pool") {
     const slot = await pickPoolSlot();
-    return slot ? { cfg: slot.cfg, provider: slot.id } : null;
+    // A WebDAV pick has no presign path — return null so uploads fall back to
+    // the server-side save, which routes to the WebDAV slot directly.
+    return slot && "cfg" in slot ? { cfg: slot.cfg, provider: slot.id } : null;
   }
   const cfg = await s3Config();
   return cfg ? { cfg, provider: "b2" } : null;
@@ -272,6 +396,16 @@ export async function saveBookFile(
   payload: Buffer
 ): Promise<StoredFile> {
   const active = await activeStorageProvider();
+  if (active === "pool") {
+    // The pool may pick a WebDAV slot, which has no presign path — write here.
+    const pick = await pickPoolSlot();
+    if (pick) {
+      const key = bookObjectKey(bookId, fileType);
+      if (await putObjectToSlot(pick.id, key, payload)) {
+        return { provider: pick.id, storageId: key };
+      }
+    }
+  }
   if (active === "s3" || active === "pool" || active === "b2") {
     const target = await activeS3Config();
     if (target) {
@@ -307,6 +441,11 @@ export async function readBookFileDecoded(
         new GetObjectCommand({ Bucket: cfg.bucket, Key: storageId })
       );
       return tryDecompress(await streamToBuffer(res.Body), encoding);
+    }
+    if (provider === "webdav" || provider === "webdav2") {
+      const wd = await webdavConfig(provider);
+      if (!wd) return null;
+      return tryDecompress(await webdavGet(wd, storageId), encoding);
     }
     if (provider === "b2" || provider === "b2_cascade") {
       const primary = await s3Config();
@@ -349,6 +488,11 @@ export async function deleteBookFile(
           // ignore
         }
       }
+      return;
+    }
+    if (provider === "webdav" || provider === "webdav2") {
+      const wd = await webdavConfig(provider);
+      if (wd) await webdavDelete(wd, storageId);
       return;
     }
     if (provider === "b2" || provider === "b2_cascade") {
@@ -394,6 +538,11 @@ export async function putSmallObject(
 ): Promise<string | null> {
   // Try the active provider first, then B2 — covers are tiny and a fallback
   // write keeps covers working while providers are being swapped over.
+  // A WebDAV pool pick has no S3 config — write the small object there first.
+  if ((await activeStorageProvider()) === "pool") {
+    const pick = await pickPoolSlot();
+    if (pick && "wd" in pick && (await webdavPut(pick.wd, key, data))) return key;
+  }
   const candidates: S3Config[] = [];
   const active = await activeS3Config();
   if (active) candidates.push(active.cfg);
@@ -433,6 +582,15 @@ export async function getSmallObject(key: string): Promise<Buffer | null> {
       }
     }
   }
+  for (const id of ["webdav", "webdav2"] as WebDavSlotId[]) {
+    const wd = await webdavConfig(id);
+    if (!wd) continue;
+    try {
+      return await webdavGet(wd, key);
+    } catch (error) {
+      console.error("getSmallObject (WebDAV) failed:", error);
+    }
+  }
   return null;
 }
 
@@ -451,6 +609,10 @@ export async function deleteSmallObject(key: string): Promise<void> {
     } catch {
       // best-effort
     }
+  }
+  for (const id of ["webdav", "webdav2"] as WebDavSlotId[]) {
+    const wd = await webdavConfig(id);
+    if (wd) await webdavDelete(wd, key);
   }
 }
 
@@ -516,6 +678,31 @@ export async function openMediaStream(
         })
       );
       return rangeResult(res.Body as Readable, res.ContentLength ?? null, rangeHeader);
+    }
+    if (provider === "webdav" || provider === "webdav2") {
+      const wd = await webdavConfig(provider);
+      if (!wd) return null;
+      const res = await fetch(webdavUrl(wd, storageId), {
+        headers: { Authorization: webdavAuth(wd), ...(rangeHeader ? { Range: rangeHeader } : {}) },
+      });
+      if (!res.ok && res.status !== 206) throw new Error(`WebDAV media failed: HTTP ${res.status}`);
+      const cr = res.headers.get("content-range");
+      let size: number | null = cr
+        ? Number(cr.split("/")[1])
+        : Number(res.headers.get("content-length")) || null;
+      let start = 0;
+      let end = Math.max(0, (size ?? 1) - 1);
+      const status: 200 | 206 = res.status === 206 ? 206 : 200;
+      const m = status === 206 && cr ? /bytes (\d+)-(\d+)\/(\d+)/.exec(cr) : null;
+      if (m) {
+        start = Number(m[1]);
+        end = Number(m[2]);
+        size = Number(m[3]);
+      }
+      const body = res.body
+        ? Readable.fromWeb(res.body as unknown as import("stream/web").ReadableStream)
+        : Readable.from([]);
+      return { stream: body, size, status, start, end };
     }
     if (provider === "b2" || provider === "b2_cascade") {
       const primary = await s3Config();

@@ -68,6 +68,28 @@ export const SETTING_KEYS: SettingKeyDef[] = [
   { key: "s3_capacity_gb", group: "storage", label: "Custom S3 capacity (GB)", secret: false, env: "S3_CAPACITY_GB",
     hint: "Pool budget for this slot — how much of the provider's free tier to use. Default 10 (R2/iDrive e2 free tier)." },
 
+  { key: "webdav_endpoint", group: "storage", label: "WebDAV endpoint", secret: false, env: "WEBDAV_ENDPOINT",
+    placeholder: "https://app.koofr.net/dav/Koofr",
+    hint: "WebDAV URL of a free-forever provider — Koofr (10GB, no card; app password in Koofr → Preferences → Password), pCloud (https://webdav.pcloud.com), Nextcloud…" },
+  { key: "webdav_username", group: "storage", label: "WebDAV username", secret: false, env: "WEBDAV_USERNAME",
+    hint: "Account email. For Koofr create an app-specific password (Preferences → Password) instead of your login password." },
+  { key: "webdav_password", group: "storage", label: "WebDAV password", secret: true, env: "WEBDAV_PASSWORD" },
+  { key: "webdav_base_path", group: "storage", label: "WebDAV folder", secret: false, env: "WEBDAV_BASE_PATH",
+    placeholder: "/nightmare-library",
+    hint: "Folder created inside the WebDAV account for book files. Default /nightmare-library." },
+  { key: "webdav_capacity_gb", group: "storage", label: "WebDAV capacity (GB)", secret: false, env: "WEBDAV_CAPACITY_GB",
+    hint: "Pool budget for this slot. Default 10 (Koofr/pCloud free tier)." },
+
+  { key: "webdav2_endpoint", group: "storage", label: "WebDAV #2 endpoint", secret: false, env: "WEBDAV2_ENDPOINT",
+    placeholder: "https://webdav.pcloud.com",
+    hint: "Second free WebDAV account — e.g. Koofr in slot 1, pCloud in slot 2 = +20GB with no credit card." },
+  { key: "webdav2_username", group: "storage", label: "WebDAV #2 username", secret: false, env: "WEBDAV2_USERNAME" },
+  { key: "webdav2_password", group: "storage", label: "WebDAV #2 password", secret: true, env: "WEBDAV2_PASSWORD" },
+  { key: "webdav2_base_path", group: "storage", label: "WebDAV #2 folder", secret: false, env: "WEBDAV2_BASE_PATH",
+    placeholder: "/nightmare-library" },
+  { key: "webdav2_capacity_gb", group: "storage", label: "WebDAV #2 capacity (GB)", secret: false, env: "WEBDAV2_CAPACITY_GB",
+    hint: "Pool budget for the second WebDAV slot. Default 10." },
+
   // ---------- Password ----------
   { key: "site_password", group: "password", label: "Site password", secret: true, env: "PASSWORD",
     hint: "Leave empty to keep using the PASSWORD env var. Takes effect immediately and signs everyone out — keep it safe." },

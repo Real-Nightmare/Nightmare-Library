@@ -136,6 +136,34 @@ export async function PUT(req: NextRequest) {
       }
     }
 
+    // ---- WebDAV connectivity test (Koofr, pCloud, Nextcloud… no card needed) ----
+    for (const [prefix, label] of [["webdav", "WebDAV"], ["webdav2", "WebDAV #2"]] as const) {
+      const touched = ["storage_provider", `${prefix}_endpoint`, `${prefix}_username`, `${prefix}_password`, `${prefix}_base_path`].some(
+        (k) => k in patch
+      );
+      if (!touched) continue;
+      const merged = await mergeForTest(patch);
+      const envp = prefix === "webdav" ? "WEBDAV" : "WEBDAV2";
+      const endpoint = merged[`${prefix}_endpoint`] || process.env[`${envp}_ENDPOINT`];
+      const username = merged[`${prefix}_username`] || process.env[`${envp}_USERNAME`];
+      const password = merged[`${prefix}_password`] || process.env[`${envp}_PASSWORD`];
+      if (endpoint?.trim() && username?.trim() && password?.trim()) {
+        const { webdavTest } = await import("@/lib/storage");
+        const err = await webdavTest({
+          endpoint: endpoint.trim(),
+          username: username.trim(),
+          password: password.trim(),
+          basePath: merged[`${prefix}_base_path`]?.trim() || "/nightmare-library",
+        });
+        if (err) {
+          return NextResponse.json(
+            { success: false, message: `${label} connection failed: ${err}` },
+            { status: 400 }
+          );
+        }
+      }
+    }
+
     await setSettings(patch);
     invalidateSettingsCache();
 

@@ -18,7 +18,7 @@ type SettingsMap = Record<string, SettingView>;
 
 const GROUPS: { id: "database" | "storage" | "password"; title: string; icon: string; blurb: string }[] = [
   { id: "database", title: "Database", icon: "🗄️", blurb: "Where your library metadata, progress and shelves live." },
-  { id: "storage", title: "File Storage", icon: "💾", blurb: "Pool mode spreads books across EVERY configured provider — fill Custom S3 (Cloudflare R2: 10GB, no download caps) and Custom S3 #2 to stack free tiers toward 100GB+. B2 alone caps downloads at 1GB/day." },
+  { id: "storage", title: "File Storage", icon: "💾", blurb: "Pool mode spreads books across EVERY configured provider — Custom S3 (R2: 10GB, no download caps), two generic WebDAV slots (Koofr 10GB, pCloud 10GB — free forever, no card) and B2. Stack free tiers to grow the pool; B2 alone caps downloads at 1GB/day." },
   { id: "password", title: "Site Password", icon: "🔒", blurb: "Change the password used to enter the library. Changing it signs out every device." },
 ];
 
@@ -290,6 +290,20 @@ export default function SettingsPage() {
                 {field("b2_cascade_bucket")}
                 {field("b2_cascade_region")}
                 {field("b2_cascade_capacity_gb")}
+                <div className="settings-divider" />
+                <h3 className="settings-sub">WebDAV — Koofr / pCloud (free forever, no card)</h3>
+                {field("webdav_endpoint")}
+                {field("webdav_username")}
+                {field("webdav_password")}
+                {field("webdav_base_path")}
+                {field("webdav_capacity_gb")}
+                <div className="settings-divider" />
+                <h3 className="settings-sub">WebDAV #2 (second free account)</h3>
+                {field("webdav2_endpoint")}
+                {field("webdav2_username")}
+                {field("webdav2_password")}
+                {field("webdav2_base_path")}
+                {field("webdav2_capacity_gb")}
                 <button className="btn-primary" disabled={saving === "storage"} onClick={() => saveGroup("storage")}>
                   {saving === "storage" ? "Testing & saving..." : "Save storage settings"}
                 </button>
