@@ -90,21 +90,24 @@ function ReaderInner() {
       const themes = renditionRef.current?.themes;
       if (!themes) return;
       const stack = FONT_STACKS[fontFamily] || FONT_STACKS.serif;
-      const pad = `${margin}px ${Math.round(margin * 1.6)}px`;
       const align = justify ? "justify" : "left";
       // Common ground shared by both themes. `!important` is not optional: an
       // EPUB ships its own stylesheet and wins every cascade battle otherwise,
       // which is how you end up reading 12px Arial inside a 1200px column with
       // a cover image blowing the page wide.
       const shared: Record<string, Record<string, string>> = {
+        // GEOMETRY BELONGS TO EPUB.JS. In paginated flow epub.js pages by
+        // stepping the iframe content sideways one stage-width at a time and
+        // sizes body itself. Any !important padding/width on html/body makes
+        // the column layout disagree with the step size, so every page after
+        // the first renders the SEAM between two columns — "showing both
+        // pages, stuck in the middle". Themes may only set typography.
         "html, body": {
           "font-family": `${stack} !important`,
           "line-height": `${lineHeight} !important`,
-          padding: `${pad} !important`,
+          padding: "0 !important",
           background: "transparent !important",
           margin: "0 !important",
-          width: "auto !important",
-          "max-width": "100% !important",
           "-webkit-text-size-adjust": "100% !important",
         },
         "p, div, span, li, blockquote, td, th, dd, dt": {
@@ -318,16 +321,18 @@ function ReaderInner() {
           // The width is CAPPED. epub.js lays the book out in CSS columns as
           // wide as the container, so a 1440px window produced a 140-character
           // line — technically "filling the screen" and unreadable in practice.
-          // A page of prose wants roughly 60-85 characters; 680px of a 16px
-          // serif lands there once the theme padding is taken off. On a phone
-          // the cap never binds and the reader stays full-bleed.
+          // A page of prose wants roughly 60-85 characters; a 680px page of
+          // 16px serif lands there. The user margin is taken OUT of the
+          // rendition width (never as body padding — see the theme note above:
+          // body padding breaks column alignment) so it insets the page
+          // symmetrically while epub.js keeps owning the geometry.
           const MAX_MEASURE = 680;
           const MIN_MEASURE = 280;
           const measure = () => {
             const hostW = host.clientWidth || window.innerWidth;
             const hostH = host.clientHeight || Math.round(window.innerHeight * 0.8);
             return {
-              width: Math.max(MIN_MEASURE, Math.min(hostW, MAX_MEASURE)),
+              width: Math.max(MIN_MEASURE, Math.min(hostW, MAX_MEASURE) - margin * 2),
               height: Math.max(200, hostH),
             };
           };
