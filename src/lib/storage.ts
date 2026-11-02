@@ -10,6 +10,7 @@ import {
   HeadObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { createHash } from "crypto";
 import { resolveSetting } from "./appsettings";
 
 /**
@@ -19,6 +20,8 @@ import { resolveSetting } from "./appsettings";
  * - b2         : Backblaze B2 (10GB free) via S3-compatible API
  * - b2_cascade : B2 with automatic failover to a second S3-compatible provider
  * - webdav/webdav2 : generic WebDAV (Koofr 10GB, pCloud 10GB — free forever, no card)
+ * - sia        : Sia network via the official SDK (@siafoundation/sia-storage)
+ *                hosted sia.storage indexer — 50GB free, no card, client-side encrypted
  * - local      : server disk .data/books/ (zero-config dev/self-host)
  *
  * COMPRESSION: book files (EPUB/PDF) are gzip-compressed CLIENT-SIDE before
@@ -29,7 +32,7 @@ import { resolveSetting } from "./appsettings";
  * transparently. Video stays raw (incompressible) and streams with HTTP Range.
  */
 
-export type StorageProvider = "b2" | "b2_cascade" | "s3" | "pool" | "local" | "webdav" | "webdav2";
+export type StorageProvider = "b2" | "b2_cascade" | "s3" | "pool" | "local" | "webdav" | "webdav2" | "sia";
 
 export interface StoredFile {
   provider: StorageProvider;
@@ -186,6 +189,213 @@ export async function webdavSlots(): Promise<WebDavSlot[]> {
   return slots;
 }
 
+// ---------------- Sia (decentralized, client-side encrypted) ----------------
+//
+// Provider via the OFFICIAL SDK (@siafoundation/sia-storage). Objects are
+// erasure-coded and encrypted CLIENT-SIDE, then pinned to a Sia indexer —
+// the hosted one (https://sia.storage) has a 50GB free tier, no card and NO
+// node to run. Connection needs a ONE-TIME browser approval (the Connect flow
+// in Settings: POST/PUT /api/settings/sia), which mints a persistent AppKey —
+// after that, restarts connect silently from phrase + app key.
+//
+// Sia has no buckets or paths: each upload returns an opaque OBJECT ID, which
+// is what we persist as storage_id. Downloads support true byte ranges
+// (offset/length), so <video> seeking works. Covers stay on S3/local — id
+// addressing would need a key→id map for tiny objects.
+//
+// Runtime note: the SDK ships a Rust native addon that needs glibc >= 2.38 on
+// Linux. On older hosts importing the addon fails fast (e.g. "undefined
+// symbol: __isoc23_sscanf"); that surfaces as a clear Sia error message
+// while every other provider keeps working untouched.
+
+// Minimal structural types. The npm package ships DIFFERENT class shapes for
+// its Node-native build and its browser-WASM build, and Next's `bundler` TS
+// resolution picks the browser declarations — so we type exactly the members
+// we call; the runtime import still resolves to the real Node/Bun build.
+type SiaObject = { id(): string; size(): bigint };
+type SiaSdk = {
+  upload(object: SiaObject, stream: ReadableStream<Uint8Array>, options?: unknown): Promise<SiaObject>;
+  pinObject(object: SiaObject): Promise<void>;
+  object(id: string): Promise<SiaObject>;
+  download(
+    object: SiaObject,
+    options?: { offset?: bigint; length?: bigint } | null
+  ): ReadableStream<Uint8Array>;
+  deleteObject(id: string): Promise<void>;
+  appKey(): { export(): Buffer };
+};
+type SiaModule = {
+  initSia(): Promise<void>;
+  Builder: new (
+    indexerUrl: string,
+    appMeta: { id: Buffer; name: string; description: string; serviceUrl: string }
+  ) => {
+    connected(appKey: unknown): Promise<SiaSdk | null>;
+    requestConnection(): Promise<void>;
+    waitForApproval(): Promise<void>;
+    responseUrl(): string;
+    register(mnemonic: string): Promise<SiaSdk>;
+  };
+  AppKey: new (key: Buffer) => unknown;
+  PinnedObject: new () => SiaObject;
+  generateRecoveryPhrase(): string;
+  validateRecoveryPhrase(phrase: string): void;
+};
+
+type SiaConfigOverride = { indexerUrl?: string; phrase?: string; appKey?: string; serviceUrl?: string };
+
+interface SiaConfig {
+  indexerUrl: string;
+  phrase: string;
+  appKey: string;
+  serviceUrl: string;
+  capacityGb: number;
+}
+
+async function siaConfig(override?: SiaConfigOverride): Promise<SiaConfig | null> {
+  const indexerUrlPlan = (override?.indexerUrl ?? (await resolveSetting("sia_indexer_url")) ?? "").trim();
+  const phrasePlan = (override?.phrase ?? (await resolveSetting("sia_recovery_phrase")) ?? "").trim();
+  const appKeyPlan = (override?.appKey ?? (await resolveSetting("sia_app_key")) ?? "").trim();
+  const serviceUrlPlan = (override?.serviceUrl ?? (await resolveSetting("sia_service_url")) ?? "").trim();
+  const rawCap = ((await resolveSetting("sia_capacity_gb")) ?? "").trim();
+  const cap = Number(rawCap || "50");
+  if (!phrasePlan && !appKeyPlan) return null;
+  return {
+    indexerUrl: indexerUrlPlan || "https://sia.storage",
+    phrase: phrasePlan,
+    appKey: appKeyPlan,
+    serviceUrl: serviceUrlPlan || indexerUrlPlan || "https://sia.storage",
+    capacityGb: Number.isFinite(cap) && cap > 0 ? cap : 50,
+  };
+}
+
+let siaModuleInit: Promise<void> | null = null;
+
+async function siaModule(): Promise<SiaModule> {
+  const m = (await import("@siafoundation/sia-storage")) as unknown as SiaModule;
+  if (!siaModuleInit) {
+    siaModuleInit = m
+      .initSia()
+      .catch((error) => {
+        siaModuleInit = null;
+        throw error;
+      });
+  }
+  await siaModuleInit;
+  return m;
+}
+
+/** Build an Sdk from a resolved config. The AppKey path needs NO approval. */
+async function siaSdkFor(cfg: SiaConfig): Promise<SiaSdk> {
+  const { Builder, AppKey } = await siaModule();
+  const appMeta = {
+    // 32-byte app id — a stable digest of the service URL keeps it constant
+    // across restarts so the indexer treats this as the same application.
+    id: createHash("sha256").update(cfg.serviceUrl || cfg.indexerUrl).digest() as Buffer,
+    name: "Nightmare Library",
+    description: "Private EPUB/PDF/video library storing on Sia",
+    serviceUrl: cfg.serviceUrl || cfg.indexerUrl,
+  };
+  const builder = new Builder(cfg.indexerUrl, appMeta);
+  if (cfg.appKey) {
+    const sdk = await builder.connected(new AppKey(Buffer.from(cfg.appKey, "hex")));
+    if (!sdk) throw new Error("Sia app key is not registered with this indexer — press Connect Sia again in Settings.");
+    return sdk;
+  }
+  throw new Error("Sia connection incomplete — press Connect Sia in Settings to authorize (no app key yet).");
+}
+
+let siaSdkPromise: Promise<SiaSdk> | null = null;
+
+/** Memoized runtime SDK — a failed attempt resets the memo for the next call. */
+async function getSiaSdk(): Promise<SiaSdk> {
+  if (!siaSdkPromise) {
+    siaSdkPromise = (async () => {
+      const cfg = await siaConfig();
+      if (!cfg) throw new Error("Sia is not configured — set the recovery phrase in Settings → File Storage.");
+      return siaSdkFor(cfg);
+    })().catch((error) => {
+      siaSdkPromise = null;
+      throw error;
+    });
+  }
+  return siaSdkPromise;
+}
+
+function siaByteStream(data: Buffer): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(data);
+      controller.close();
+    },
+  });
+}
+
+/** Upload raw bytes to Sia; the returned object id becomes the storage_id. */
+async function siaUpload(data: Buffer): Promise<string> {
+  const sdk = await getSiaSdk();
+  const { PinnedObject } = await siaModule();
+  const object = await sdk.upload(new PinnedObject(), siaByteStream(data));
+  await sdk.pinObject(object);
+  return object.id();
+}
+
+/** Read a Sia object (optionally a byte range) — null when unreachable/missing. */
+async function siaGet(id: string, range?: { offset: number; length: number }): Promise<Buffer | null> {
+  try {
+    const sdk = await getSiaSdk();
+    const object = await sdk.object(id);
+    const options = range
+      ? { offset: BigInt(range.offset), length: BigInt(range.length) }
+      : null;
+    return await streamToBuffer(sdk.download(object, options));
+  } catch (error) {
+    console.error("siaGet failed:", error);
+    return null;
+  }
+}
+
+async function siaDelete(id: string): Promise<void> {
+  const sdk = await getSiaSdk();
+  await sdk.deleteObject(id);
+}
+
+/**
+ * Probe the REAL indexer with a tiny upload→read→delete round-trip. Returns
+ * an error message, or null when healthy. `override` lets the settings route
+ * test a NOT-YET-SAVED configuration.
+ */
+export async function siaTestRoundtrip(override?: SiaConfigOverride): Promise<string | null> {
+  try {
+    const cfg = await siaConfig(override);
+    if (!cfg) return "Sia is not configured — set a recovery phrase and press Connect Sia.";
+    const sdk = await siaSdkFor(cfg);
+    const { PinnedObject } = await siaModule();
+    const probe = Buffer.from(`nightmare-library sia probe ${Date.now()}`);
+    const object = await sdk.upload(new PinnedObject(), siaByteStream(probe));
+    await sdk.pinObject(object);
+    const back = await streamToBuffer(sdk.download(object, null));
+    if (!probe.equals(back)) return "Sia round-trip returned different bytes.";
+    await sdk.deleteObject(object.id());
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : "Sia is unreachable.";
+  }
+}
+
+/** The Sia slot for the storage POOL. */
+export interface SiaSlot {
+  id: "sia";
+  label: string;
+  cfg: SiaConfig;
+  capacityBytes: number;
+}
+
+export async function siaSlots(): Promise<SiaSlot[]> {
+  const cfg = await siaConfig();
+  return cfg ? [{ id: "sia", label: "Sia", cfg, capacityBytes: cfg.capacityGb * 1024 ** 3 }] : [];
+}
+
 /**
  * One configured S3 endpoint that can participate in the storage POOL.
  * "b2_cascade" is reused as a fully generic second custom-S3 slot.
@@ -216,7 +426,7 @@ export async function storageSlots(): Promise<StorageSlot[]> {
   return slots;
 }
 
-type PoolPick = { id: "b2" | "s3" | "b2_cascade"; cfg: S3Config } | { id: WebDavSlotId; wd: WebDavConfig };
+type PoolPick = { id: "b2" | "s3" | "b2_cascade"; cfg: S3Config } | { id: WebDavSlotId; wd: WebDavConfig } | { id: "sia" };
 
 /**
  * POOL: pick the slot with the most free space left (capacity minus recorded
@@ -227,7 +437,8 @@ type PoolPick = { id: "b2" | "s3" | "b2_cascade"; cfg: S3Config } | { id: WebDav
 async function pickPoolSlot(): Promise<PoolPick | null> {
   const s3 = await storageSlots();
   const wds = await webdavSlots();
-  if (s3.length === 0 && wds.length === 0) return null;
+  const sias = await siaSlots();
+  if (s3.length === 0 && wds.length === 0 && sias.length === 0) return null;
   let usage: Record<string, number> = {};
   try {
     const { providerUsage } = await import("./repo");
@@ -235,24 +446,23 @@ async function pickPoolSlot(): Promise<PoolPick | null> {
   } catch {
     // usage unknown — treat all as empty
   }
-  const candidates: PoolPick[] = [
-    ...s3.map((s) => ({ id: s.id, cfg: s.cfg } as PoolPick)),
-    ...wds.map((s) => ({ id: s.id, wd: s.wd } as PoolPick)),
+  // Each candidate carries its capacity so the "most free space" pick does a
+  // single membership lookup instead of per-kind array archaeology.
+  const candidates: { pick: PoolPick; capacityBytes: number }[] = [
+    ...s3.map((s) => ({ pick: { id: s.id, cfg: s.cfg } as PoolPick, capacityBytes: s.capacityBytes })),
+    ...wds.map((s) => ({ pick: { id: s.id, wd: s.wd } as PoolPick, capacityBytes: s.capacityBytes })),
+    ...sias.map((s) => ({ pick: { id: "sia" } as PoolPick, capacityBytes: s.capacityBytes })),
   ];
-  let best = candidates[0];
+  let best: { pick: PoolPick; capacityBytes: number } | null = null;
   let bestFree = -Infinity;
   for (const c of candidates) {
-    const cap =
-      "cfg" in c
-        ? (s3.find((s) => s.id === c.id)?.capacityBytes ?? 0)
-        : (wds.find((s) => s.id === c.id)?.capacityBytes ?? 0);
-    const free = cap - (usage[c.id] ?? 0);
+    const free = c.capacityBytes - (usage[c.pick.id] ?? 0);
     if (free > bestFree) {
       bestFree = free;
       best = c;
     }
   }
-  return best;
+  return best?.pick ?? null;
 }
 
 function clientFor(cfg: S3Config): S3Client {
@@ -396,10 +606,25 @@ export async function saveBookFile(
   payload: Buffer
 ): Promise<StoredFile> {
   const active = await activeStorageProvider();
+  if (active === "sia") {
+    // Direct Sia: bytes go to the SDK, which returns an opaque object id.
+    try {
+      return { provider: "sia", storageId: await siaUpload(payload) };
+    } catch (error) {
+      console.error("Sia upload failed — falling back:", error);
+    }
+  }
   if (active === "pool") {
-    // The pool may pick a WebDAV slot, which has no presign path — write here.
+    // The pool may pick a WebDAV slot (no presign path) or the Sia slot
+    // (id-addressed) — both are written HERE, server-side.
     const pick = await pickPoolSlot();
-    if (pick) {
+    if (pick?.id === "sia") {
+      try {
+        return { provider: "sia", storageId: await siaUpload(payload) };
+      } catch (error) {
+        console.error("Sia pool upload failed — falling back:", error);
+      }
+    } else if (pick) {
       const key = bookObjectKey(bookId, fileType);
       if (await putObjectToSlot(pick.id, key, payload)) {
         return { provider: pick.id, storageId: key };
@@ -447,6 +672,10 @@ export async function readBookFileDecoded(
       if (!wd) return null;
       return tryDecompress(await webdavGet(wd, storageId), encoding);
     }
+    if (provider === "sia") {
+      const data = await siaGet(storageId);
+      return data ? tryDecompress(data, encoding) : null;
+    }
     if (provider === "b2" || provider === "b2_cascade") {
       const primary = await s3Config();
       const secondary = await cascadeConfig();
@@ -493,6 +722,14 @@ export async function deleteBookFile(
     if (provider === "webdav" || provider === "webdav2") {
       const wd = await webdavConfig(provider);
       if (wd) await webdavDelete(wd, storageId);
+      return;
+    }
+    if (provider === "sia") {
+      try {
+        await siaDelete(storageId);
+      } catch {
+        // best-effort — the object may already be gone
+      }
       return;
     }
     if (provider === "b2" || provider === "b2_cascade") {
@@ -703,6 +940,27 @@ export async function openMediaStream(
         ? Readable.fromWeb(res.body as unknown as import("stream/web").ReadableStream)
         : Readable.from([]);
       return { stream: body, size, status, start, end };
+    }
+    if (provider === "sia") {
+      // Sia downloads stream byte ranges natively (offset/length) — no
+      // content-range parsing needed, the requested window IS the payload.
+      const sdk = await getSiaSdk();
+      const object = await sdk.object(storageId);
+      const size = Number(object.size());
+      const range = parseRange(rangeHeader, size);
+      const options = range
+        ? { offset: BigInt(range.start), length: BigInt(range.end - range.start + 1) }
+        : null;
+      const body = Readable.fromWeb(
+        sdk.download(object, options) as unknown as import("stream/web").ReadableStream
+      );
+      return {
+        stream: body,
+        size,
+        status: range && rangeHeader ? 206 : 200,
+        start: range?.start ?? 0,
+        end: range?.end ?? Math.max(0, size - 1),
+      };
     }
     if (provider === "b2" || provider === "b2_cascade") {
       const primary = await s3Config();

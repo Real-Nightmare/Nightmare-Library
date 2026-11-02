@@ -110,6 +110,29 @@ export async function PUT(req: NextRequest) {
       }
     }
 
+    // ---- Sia connectivity test (official SDK round-trip through the indexer) ----
+    if (
+      ["storage_provider", "sia_recovery_phrase", "sia_app_key", "sia_indexer_url", "sia_service_url", "sia_capacity_gb"].some(
+        (k) => k in patch
+      )
+    ) {
+      const merged = await mergeForTest(patch);
+      const phrase = merged["sia_recovery_phrase"] || process.env.SIA_RECOVERY_PHRASE || "";
+      const appKey = merged["sia_app_key"] || process.env.SIA_APP_KEY || "";
+      if (phrase.trim() || appKey.trim()) {
+        const { siaTestRoundtrip } = await import("@/lib/storage");
+        const err = await siaTestRoundtrip({
+          indexerUrl: patch.sia_indexer_url,
+          phrase: patch.sia_recovery_phrase,
+          appKey: patch.sia_app_key,
+          serviceUrl: patch.sia_service_url,
+        });
+        if (err) {
+          return NextResponse.json({ success: false, message: `Sia failed: ${err}` }, { status: 400 });
+        }
+      }
+    }
+
     // ---- Custom S3-compatible provider connectivity test (R2, Storj, iDrive e2…) ----
     if (["storage_provider", "s3_endpoint", "s3_region", "s3_key_id", "s3_secret", "s3_bucket"].some((k) => k in patch)) {
       const merged = await mergeForTest(patch);

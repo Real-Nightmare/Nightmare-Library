@@ -18,7 +18,7 @@ type SettingsMap = Record<string, SettingView>;
 
 const GROUPS: { id: "database" | "storage" | "password"; title: string; icon: string; blurb: string }[] = [
   { id: "database", title: "Database", icon: "🗄️", blurb: "Where your library metadata, progress and shelves live." },
-  { id: "storage", title: "File Storage", icon: "💾", blurb: "Pool mode spreads books across EVERY configured provider — Custom S3 (R2: 10GB, no download caps), two generic WebDAV slots (Koofr 10GB, pCloud 10GB — free forever, no card) and B2. Stack free tiers to grow the pool; B2 alone caps downloads at 1GB/day." },
+  { id: "storage", title: "File Storage", icon: "💾", blurb: "Pool mode spreads books across EVERY configured provider — Custom S3 (R2: 10GB, no download caps), two generic WebDAV slots (Koofr 10GB, pCloud 10GB), Sia (50GB hosted indexer, client-side encrypted) and B2. Stack free tiers to grow the pool; B2 alone caps downloads at 1GB/day." },
   { id: "password", title: "Site Password", icon: "🔒", blurb: "Change the password used to enter the library. Changing it signs out every device." },
 ];
 
@@ -36,6 +36,13 @@ export default function SettingsPage() {
   const [nextPw, setNextPw] = useState("");
   const [confirmPw, setConfirmPw] = useState("");
   const [migrating, setMigrating] = useState(false);
+
+  // Sia connection ceremony state (POST → user approves in browser → poll → save key)
+  const [sia, setSia] = useState<{
+    phase: "idle" | "connecting" | "awaiting" | "saving";
+    responseUrl?: string;
+    sessionId?: string;
+  }>({ phase: "idle" });
 
   const load = useCallback(async () => {
     const res = await fetch("/api/settings");
@@ -120,6 +127,74 @@ export default function SettingsPage() {
       setMessage({ group: "storage", ok: false, text: "Migration failed — network error" });
     } finally {
       setMigrating(false);
+    }
+  };
+
+  /**
+   * Connect Sia: start the approval ceremony, open the approval page, poll
+   * until the user approves, then drop the minted app key + phrase straight
+   * into a settings save (which runs the live Sia round-trip test).
+   */
+  const connectSia = async () => {
+    setSia({ phase: "connecting" });
+    setMessage({ group: "storage", ok: true, text: "Starting Sia connection — approve it in your browser…" });
+    try {
+      const res = await fetch("/api/settings/sia", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ indexerUrl: draft.sia_indexer_url, serviceUrl: draft.sia_service_url }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || "Connect failed");
+      setSia({ phase: "awaiting", responseUrl: data.responseUrl, sessionId: data.sessionId });
+
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const poll = await fetch("/api/settings/sia", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: data.sessionId, phrase: draft.sia_recovery_phrase }),
+        });
+        const pollData = await poll.json();
+        if (!pollData.success) throw new Error(pollData.message || "Sia approval failed");
+        if (pollData.pending) continue;
+
+        // Minted — save the app key + phrase immediately. Empty fields must be
+        // omitted (an empty value clears a stored override).
+        setSia({ phase: "saving" });
+        const patch: Record<string, string> = {
+          sia_recovery_phrase: pollData.phrase,
+          sia_app_key: pollData.appKey,
+        };
+        const idx = (draft.sia_indexer_url ?? "").trim();
+        const svc = (draft.sia_service_url ?? "").trim();
+        if (idx) patch.sia_indexer_url = idx;
+        if (svc) patch.sia_service_url = svc;
+
+        const save = await fetch("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        });
+        const saveData = await save.json();
+        if (saveData.success) {
+          setMessage({
+            group: "storage",
+            ok: true,
+            text: `Sia connected, round-trip verified and saved. Active storage: ${saveData.active?.storage ?? "sia"}.`,
+          });
+        } else {
+          setMessage({ group: "storage", ok: false, text: `Connected, but saving failed: ${saveData.message}` });
+          set("sia_recovery_phrase", pollData.phrase);
+          set("sia_app_key", pollData.appKey);
+        }
+        setSia({ phase: "idle" });
+        await load();
+        return;
+      }
+    } catch (e) {
+      setMessage({ group: "storage", ok: false, text: e instanceof Error ? e.message : "Sia connect failed" });
+      setSia({ phase: "idle" });
     }
   };
 
@@ -304,6 +379,40 @@ export default function SettingsPage() {
                 {field("webdav2_password")}
                 {field("webdav2_base_path")}
                 {field("webdav2_capacity_gb")}
+                <div className="settings-divider" />
+                <h3 className="settings-sub">Sia — decentralized, client-side encrypted (50GB free, no card)</h3>
+                {field("sia_indexer_url")}
+                {field("sia_service_url")}
+                {field("sia_recovery_phrase")}
+                {field("sia_app_key")}
+                {field("sia_capacity_gb")}
+                <button
+                  className="btn-primary"
+                  disabled={sia.phase !== "idle"}
+                  onClick={connectSia}
+                >
+                  {sia.phase === "connecting"
+                    ? "Starting connection…"
+                    : sia.phase === "awaiting"
+                      ? "Waiting for your approval…"
+                      : sia.phase === "saving"
+                        ? "Saving app key…"
+                        : "Connect Sia"}
+                </button>
+                {sia.phase === "awaiting" && sia.responseUrl && (
+                  <p className="settings-hint">
+                    Approve the connection in your browser: {" "}
+                    <a href={sia.responseUrl} target="_blank" rel="noreferrer">
+                      open the approval page
+                    </a>{" "}
+                    — we keep polling and save the minted app key automatically (~30 seconds).
+                  </p>
+                )}
+                <p className="settings-hint">
+                  One-time approval per indexer. Books are encrypted on this server before they leave, so nothing
+                  readable ever touches the Sia hosts. Keep the recovery phrase safe — nothing on Sia is recoverable
+                  without it.
+                </p>
                 <button className="btn-primary" disabled={saving === "storage"} onClick={() => saveGroup("storage")}>
                   {saving === "storage" ? "Testing & saving..." : "Save storage settings"}
                 </button>

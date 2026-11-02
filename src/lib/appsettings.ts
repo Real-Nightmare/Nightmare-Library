@@ -44,7 +44,7 @@ export const SETTING_KEYS: SettingKeyDef[] = [
 
   // ---------- Storage ----------
   { key: "storage_provider", group: "storage", label: "Storage provider", secret: false, env: "",
-    hint: "pool = spread books across EVERY configured provider (sums their free tiers — recommended), s3 = one custom S3 provider (R2, iDrive e2, Filebase…), b2 = Backblaze B2, b2_cascade = B2 + failover, local = server disk" },
+    hint: "pool = spread books across EVERY configured provider (sums their free tiers — recommended), s3 = one custom S3 provider (R2, iDrive e2, Filebase…), sia = Sia network via the official SDK (hosted sia.storage indexer: 50GB free, client-side encrypted), b2 = Backblaze B2, b2_cascade = B2 + failover, local = server disk" },
   { key: "b2_key_id", group: "storage", label: "B2 key ID", secret: true, env: "B2_KEY_ID" },
   { key: "b2_application_key", group: "storage", label: "B2 application key", secret: true, env: "B2_APPLICATION_KEY" },
   { key: "b2_bucket", group: "storage", label: "B2 bucket name", secret: false, env: "B2_BUCKET_NAME" },
@@ -89,6 +89,18 @@ export const SETTING_KEYS: SettingKeyDef[] = [
     placeholder: "/nightmare-library" },
   { key: "webdav2_capacity_gb", group: "storage", label: "WebDAV #2 capacity (GB)", secret: false, env: "WEBDAV2_CAPACITY_GB",
     hint: "Pool budget for the second WebDAV slot. Default 10." },
+
+  { key: "sia_indexer_url", group: "storage", label: "Sia indexer URL", secret: false, env: "SIA_INDEXER_URL",
+    placeholder: "https://sia.storage",
+    hint: "Sia indexer that pins encrypted objects — sia.storage is hosted by the Sia Foundation with a 50GB free tier (no card, no node to run). Press \"Connect Sia\" below once; the approval mints a persistent app key." },
+  { key: "sia_recovery_phrase", group: "storage", label: "Sia recovery phrase", secret: true, env: "SIA_RECOVERY_PHRASE",
+    hint: "12-word phrase that owns the Sia account and derives the client-side encryption keys. KEEP IT SAFE — stored books are unrecoverable without it." },
+  { key: "sia_app_key", group: "storage", label: "Sia app key", secret: true, env: "SIA_APP_KEY",
+    hint: "64 hex chars minted by the Connect flow so restarts skip re-approval." },
+  { key: "sia_service_url", group: "storage", label: "Sia service URL", secret: false, env: "SIA_SERVICE_URL",
+    hint: "What the approval page shows as the connecting app. Defaults to the indexer URL." },
+  { key: "sia_capacity_gb", group: "storage", label: "Sia capacity (GB)", secret: false, env: "SIA_CAPACITY_GB",
+    hint: "Pool budget for the Sia slot. Default 50 (hosted sia.storage free tier)." },
 
   // ---------- Password ----------
   { key: "site_password", group: "password", label: "Site password", secret: true, env: "PASSWORD",
@@ -250,11 +262,11 @@ export async function resolveDatabaseProvider(): Promise<"supabase" | "turso" | 
   return tUrl ? "turso" : "local";
 }
 
-export type StorageProviderId = "b2" | "b2_cascade" | "s3" | "pool" | "local";
+export type StorageProviderId = "b2" | "b2_cascade" | "s3" | "pool" | "local" | "sia";
 
 export async function resolveStorageProvider(): Promise<StorageProviderId> {
   const p = await resolveSetting("storage_provider");
-  if (p === "b2" || p === "b2_cascade" || p === "s3" || p === "pool" || p === "local") return p;
+  if (p === "b2" || p === "b2_cascade" || p === "s3" || p === "pool" || p === "local" || p === "sia") return p;
   const map = await cachedMap();
   const keyId = map["b2_key_id"]?.trim() || process.env.B2_KEY_ID?.trim();
   const appKey = map["b2_application_key"]?.trim() || process.env.B2_APPLICATION_KEY?.trim();
